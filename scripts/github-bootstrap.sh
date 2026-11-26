@@ -62,7 +62,7 @@ run() {
 # ---------------------------------------------------------------- labels
 mapfile -t LABELS < <(
   { for f in "$ISSUES_DIR"/*/[0-9]*.md; do labels_of "$f" | tr ',' '\n'; done
-    echo "type:roadmap"; } | sed 's/^ *//; s/ *$//' | grep -v '^$' | sort -u
+    printf "%s\n" type:roadmap type:bug; } | sed 's/^ *//; s/ *$//' | grep -v '^$' | sort -u
 )
 
 existing_labels=""
