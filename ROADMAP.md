@@ -18,8 +18,8 @@ Hiccup is a free, open source, cross-platform toolkit for web application securi
 
 | #  | Milestone | Goal | Exit criteria | Release | Status |
 |----|-----------|------|---------------|---------|--------|
-| M0 | [Foundations](docs/roadmap/issues/m0-foundations/) | Workspace, CI, community health files | CI green on Linux, macOS, Windows | — | In progress |
-| M1 | [Proxy core](docs/roadmap/issues/m1-proxy-core/) | Headless HTTP/1.1 + HTTPS MITM proxy with history, intercept and CLI control API | curl and a browser work through the proxy, driven entirely by the CLI, on all 3 OSes | — | Planned |
+| M0 | [Foundations](docs/roadmap/issues/m0-foundations/) | Workspace, CI, community health files | CI green on Linux, macOS, Windows | — | ✅ Done |
+| M1 | [Proxy core](docs/roadmap/issues/m1-proxy-core/) | Headless HTTP/1.1 + HTTPS MITM proxy with history, intercept and CLI control API | curl and a browser work through the proxy, driven entirely by the CLI, on all 3 OSes | — | In progress |
 | M2 | [Repeater core](docs/roadmap/issues/m2-repeater-core/) | Headless raw request sender with persisted tabs | Replaying a captured request is byte-identical, which tests verify | — | Planned |
 | M3 | [FFI layer](docs/roadmap/issues/m3-ffi/) | Core API exposed to Swift and C# | Swift and C# smoke tests pass in CI on macOS and Windows | — | Planned |
 | M4 | [Linux frontend](docs/roadmap/issues/m4-linux-frontend/) | GTK4 + libadwaita UI for proxy and repeater | Full proxy + repeater workflow usable; packages built | **v0.1.0** | Planned |
