@@ -2,15 +2,126 @@
 
 //! `hiccup`: the command-line interface to Hiccup.
 
-use clap::Parser;
+use std::io::IsTerminal;
+use std::net::SocketAddr;
+use std::process::ExitCode;
+
+use clap::{ArgAction, Args, Parser, Subcommand};
+use hiccup_proxy::{Proxy, ProxyConfig};
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::EnvFilter;
 
 /// Open source web security testing toolkit.
 #[derive(Debug, Parser)]
-#[command(name = "hiccup", version, about)]
-struct Cli {}
+#[command(
+    name = "hiccup",
+    version,
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    /// Increase log verbosity (-v: debug, -vv: trace). `RUST_LOG` overrides it.
+    #[arg(short, long, action = ArgAction::Count, global = true)]
+    verbose: u8,
 
-fn main() {
-    let _cli = Cli::parse();
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Intercepting proxy.
+    #[command(subcommand)]
+    Proxy(ProxyCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ProxyCommand {
+    /// Start the proxy.
+    Start(StartArgs),
+}
+
+#[derive(Debug, Args)]
+struct StartArgs {
+    /// Run an embedded proxy in this terminal until Ctrl+C.
+    ///
+    /// Without it, the proxy would start in a running Hiccup instance, which
+    /// needs the control API (not implemented yet).
+    #[arg(long)]
+    foreground: bool,
+
+    /// Address to listen on. Repeat to listen on several addresses.
+    #[arg(long = "listen", value_name = "ADDR", default_value = "127.0.0.1:8080")]
+    listen: Vec<SocketAddr>,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    init_logging(cli.verbose);
+    match cli.command {
+        Command::Proxy(ProxyCommand::Start(args)) => proxy_start(args),
+    }
+}
+
+fn init_logging(verbose: u8) {
+    let default = match verbose {
+        0 => "warn,hiccup_proxy=info,hiccup_cli=info",
+        1 => "info,hiccup_proxy=debug,hiccup_cli=debug",
+        _ => "trace",
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
+fn proxy_start(args: StartArgs) -> ExitCode {
+    if !args.foreground {
+        eprintln!(
+            "hiccup: starting the proxy in a running instance needs the control API, which is \
+             not implemented yet (https://github.com/dehy/hiccup/issues/15).\n\
+             Use `hiccup proxy start --foreground` to run it in this terminal."
+        );
+        return ExitCode::from(2);
+    }
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("hiccup: cannot start the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async {
+        let config = ProxyConfig {
+            listen: args.listen,
+            ..ProxyConfig::default()
+        };
+        let proxy = match Proxy::bind(config).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("hiccup: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for addr in proxy.local_addrs() {
+            eprintln!("Hiccup proxy listening on http://{addr}");
+        }
+        eprintln!("Press Ctrl+C to stop.");
+
+        let shutdown = CancellationToken::new();
+        let on_signal = shutdown.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("Stopping...");
+            }
+            on_signal.cancel();
+        });
+        proxy.serve(shutdown).await;
+        ExitCode::SUCCESS
+    })
 }
 
 #[cfg(test)]

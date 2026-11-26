@@ -20,6 +20,15 @@ cargo build --release
 ./target/release/hiccup --help
 ```
 
+## Quick start
+
+```sh
+hiccup proxy start --foreground            # listens on 127.0.0.1:8080
+curl -x http://127.0.0.1:8080 http://example.com/
+```
+
+So far Hiccup forwards HTTP and tunnels HTTPS (`CONNECT`) without decrypting it. Interception, history and TLS inspection are coming next; see the [roadmap](ROADMAP.md).
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS and Windows.
 
 ## Documentation
