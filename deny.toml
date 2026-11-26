@@ -1,0 +1,50 @@
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
+# Run locally with: cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisory database. Vulnerable or unmaintained crates fail the check.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# The allow-list is a policy, not an inventory: do not warn for unused entries.
+unused-allowed-license = "allow"
+# Licenses compatible with AGPL-3.0-or-later (see ADR 0002).
+# Add to this list only after checking compatibility in a PR.
+allow = [
+  "AGPL-3.0-or-later",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "GPL-3.0-or-later",
+  "ISC",
+  "LGPL-2.1-or-later",
+  "LGPL-3.0-or-later",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates carry no version requirement.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
