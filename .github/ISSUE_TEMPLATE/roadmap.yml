@@ -1,0 +1,23 @@
+name: Roadmap / architecture proposal
+description: Propose a change to the roadmap, a milestone, or the architecture.
+labels: ["type:roadmap"]
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change in ROADMAP.md or the architecture?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+    validations:
+      required: true
+  - type: checkboxes
+    id: adr
+    attributes:
+      label: ADR
+      options:
+        - label: This changes an architecture decision, so I will open (or have opened) an ADR in docs/adr/.
