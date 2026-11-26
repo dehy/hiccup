@@ -57,6 +57,18 @@ Also check the following:
 - **Changelog:** add an entry under `Unreleased` in [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
 - **License header:** every new source file starts with `// SPDX-License-Identifier: AGPL-3.0-or-later`.
 
+## Fuzzing
+
+The HTTP codec has [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) targets in `fuzz/`. They need a nightly toolchain:
+
+```sh
+rustup toolchain install nightly
+cargo install --locked cargo-fuzz
+cd fuzz && cargo +nightly fuzz run parse_request -- -max_total_time=60
+```
+
+If you find a crash, add the input to the unit tests as a regression case. If it could be security-relevant, report it privately (see [SECURITY.md](SECURITY.md)).
+
 ## Commit messages
 
 We use [Conventional Commits](https://www.conventionalcommits.org/):
