@@ -1,6 +1,6 @@
 # ADR 0003: Raw HTTP wire fidelity
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by [ADR 0006](0006-own-http-tokenizer.md) (no httparse)
 - **Date:** 2026-11-26
 
 ## Context

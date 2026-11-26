@@ -119,6 +119,41 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  fuzz:
+    name: Fuzz (${{ matrix.target }}, informational)
+    runs-on: ubuntu-latest
+    # Not required by `ci-ok`: a nightly toolchain regression must not block
+    # merges. A crash found here is still a real bug; open an issue.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_request, parse_response, chunked_body]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+      - name: Fuzz for 60 seconds
+        working-directory: fuzz
+        # The prebuilt cargo-fuzz is a musl binary and would default to the
+        # musl target, which the nightly toolchain does not have installed.
+        run: >-
+          cargo +nightly fuzz run ${{ matrix.target }}
+          --target x86_64-unknown-linux-gnu -- -max_total_time=60
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+
   # Single required status check for branch protection.
   ci-ok:
     name: CI OK

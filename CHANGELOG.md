@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `hiccup-http`: raw-preserving HTTP/1.1 codec. It has a lenient head tokenizer with anomaly reporting, RFC 9112 framing with smuggling-relevant ambiguities flagged, a streaming chunked/length/until-close body decoder, and byte-identical round trips. It is fuzzed in CI (ADR 0006).
 - Cargo workspace with the `hiccup` CLI binary and crates for the core, the HTTP codec, the proxy, storage and the control API.
 - Cross-platform CI (Linux, macOS, Windows): formatting, clippy, tests, MSRV, docs, dependency policy (cargo-deny) and coverage.
 - Release workflow that builds CLI binaries for 6 targets and drafts a GitHub Release.

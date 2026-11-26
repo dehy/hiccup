@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The fuzz crate needs nightly and cargo-fuzz; it is built separately.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -14,7 +16,10 @@ publish = false
 [workspace.dependencies]
 # Internal crates are added here (`name = { path = "crates/name" }`)
 # when another crate starts depending on them.
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
+proptest = "1"
+thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
