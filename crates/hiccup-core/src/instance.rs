@@ -1,0 +1,295 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! A running Hiccup instance.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use hiccup_control::api::{InstanceInfo, ProxyStartParams, ProxyStartResult, ProxyStatus, method};
+use hiccup_control::{API_VERSION, BoxFuture, ErrorCode, Handler, RpcError};
+use hiccup_proxy::{CertificateAuthority, Exchange, Proxy};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio::sync::{Mutex, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+/// One running Hiccup: the state behind the control API.
+pub struct Instance {
+    name: String,
+    data_dir: PathBuf,
+    started_at: u64,
+    shutdown: CancellationToken,
+    proxy: Mutex<Option<RunningProxy>>,
+    proxy_running: watch::Sender<bool>,
+}
+
+struct RunningProxy {
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+    listen: Vec<String>,
+    verify_upstream: bool,
+    exchanges: Arc<AtomicU64>,
+}
+
+impl RunningProxy {
+    fn status(&self) -> ProxyStatus {
+        ProxyStatus {
+            running: true,
+            listen: self.listen.clone(),
+            verify_upstream: self.verify_upstream,
+            exchanges: self.exchanges.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Instance {
+    /// An instance named `name`, keeping its data (the CA) in `data_dir`.
+    #[must_use]
+    pub fn new(name: impl Into<String>, data_dir: impl Into<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.into(),
+            data_dir: data_dir.into(),
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            shutdown: CancellationToken::new(),
+            proxy: Mutex::new(None),
+            proxy_running: watch::channel(false).0,
+        })
+    }
+
+    /// Cancelled when the instance is asked to stop (`instance.shutdown`).
+    #[must_use]
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
+    /// Follows whether the proxy is running.
+    #[must_use]
+    pub fn proxy_running(&self) -> watch::Receiver<bool> {
+        self.proxy_running.subscribe()
+    }
+
+    /// Describes the instance.
+    #[must_use]
+    pub fn info(&self) -> InstanceInfo {
+        InstanceInfo {
+            name: self.name.clone(),
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            api_version: API_VERSION.to_owned(),
+            started_at: self.started_at,
+        }
+    }
+
+    /// Starts the proxy.
+    ///
+    /// # Errors
+    ///
+    /// See the `proxy.start` method in `docs/control-api.md`.
+    pub async fn start_proxy(
+        &self,
+        params: ProxyStartParams,
+    ) -> Result<ProxyStartResult, RpcError> {
+        let mut slot = self.proxy.lock().await;
+        if slot.as_ref().is_some_and(|p| !p.task.is_finished()) {
+            return Err(RpcError::new(
+                ErrorCode::InvalidState,
+                "the proxy is already running",
+            ));
+        }
+        let config = crate::params::proxy_config(&params)?;
+        let verify_upstream = config.upstream.verify;
+        let failed = |e: String| RpcError::new(ErrorCode::Failed, e);
+
+        let (ca, ca_generated) = CertificateAuthority::load_or_generate(&self.data_dir)
+            .map_err(|e| failed(format!("cannot load the CA: {e}")))?;
+        let ca_sha256 = ca
+            .info()
+            .sha256
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":");
+        let exchanges = Arc::new(AtomicU64::new(0));
+        let counter = exchanges.clone();
+        let proxy = Proxy::bind(config)
+            .await
+            .map_err(|e| failed(e.to_string()))?
+            .with_observer(Arc::new(move |_: &Exchange| {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }))
+            .intercept_tls(Arc::new(ca))
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let listen: Vec<String> = proxy
+            .local_addrs()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        let stop = CancellationToken::new();
+        let running = self.proxy_running.clone();
+        let task = tokio::spawn(proxy.serve(stop.clone()));
+        running.send_replace(true);
+        info!(listen = ?listen, "proxy started");
+
+        let proxy = RunningProxy {
+            stop,
+            task,
+            listen,
+            verify_upstream,
+            exchanges,
+        };
+        let result = ProxyStartResult {
+            proxy: proxy.status(),
+            ca_generated,
+            ca_sha256,
+        };
+        *slot = Some(proxy);
+        Ok(result)
+    }
+
+    /// Stops the proxy, letting in-flight exchanges finish within the grace
+    /// period.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the proxy is not running.
+    pub async fn stop_proxy(&self) -> Result<ProxyStatus, RpcError> {
+        let Some(proxy) = self.proxy.lock().await.take() else {
+            return Err(RpcError::new(
+                ErrorCode::InvalidState,
+                "the proxy is not running",
+            ));
+        };
+        proxy.stop.cancel();
+        let _ = proxy.task.await;
+        self.proxy_running.send_replace(false);
+        Ok(ProxyStatus::default())
+    }
+
+    /// Describes the proxy.
+    pub async fn proxy_status(&self) -> ProxyStatus {
+        self.proxy
+            .lock()
+            .await
+            .as_ref()
+            .map_or_else(ProxyStatus::default, RunningProxy::status)
+    }
+
+    /// Stops the proxy if it runs, then cancels [`shutdown_token`](Self::shutdown_token).
+    pub async fn shutdown(&self) {
+        let _ = self.stop_proxy().await;
+        self.shutdown.cancel();
+    }
+}
+
+impl Handler for Instance {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: Value,
+    ) -> BoxFuture<'a, Result<Value, RpcError>> {
+        Box::pin(async move {
+            match method {
+                method::INSTANCE_INFO => reply(&self.info()),
+                method::INSTANCE_SHUTDOWN => {
+                    // Answer before the connection closes.
+                    let shutdown = self.shutdown.clone();
+                    let proxy = self.proxy.lock().await.take();
+                    tokio::spawn(async move {
+                        if let Some(proxy) = proxy {
+                            proxy.stop.cancel();
+                            let _ = proxy.task.await;
+                        }
+                        shutdown.cancel();
+                    });
+                    reply(&serde_json::json!({}))
+                }
+                method::PROXY_START => reply(&self.start_proxy(parse(params)?).await?),
+                method::PROXY_STOP => reply(&self.stop_proxy().await?),
+                method::PROXY_STATUS => reply(&self.proxy_status().await),
+                _ => Err(RpcError::new(
+                    ErrorCode::MethodNotFound,
+                    format!("unknown method {method:?}"),
+                )),
+            }
+        })
+    }
+}
+
+fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
+    serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))
+}
+
+fn reply<T: Serialize>(value: &T) -> Result<Value, RpcError> {
+    serde_json::to_value(value).map_err(|e| RpcError::new(ErrorCode::InternalError, e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn proxy_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let instance = Instance::new("t", dir.path());
+        let call = |m: &'static str, p: Value| {
+            let instance = instance.clone();
+            async move { instance.call(m, p).await }
+        };
+
+        assert_eq!(
+            call(method::PROXY_STATUS, json!({})).await.unwrap()["running"],
+            false
+        );
+        let started = call(method::PROXY_START, json!({"listen": ["127.0.0.1:0"]}))
+            .await
+            .unwrap();
+        assert_eq!(started["proxy"]["running"], true);
+        assert_eq!(started["ca_generated"], true);
+        assert!(
+            started["proxy"]["listen"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("127.0.0.1:")
+        );
+        assert!(*instance.proxy_running().borrow());
+
+        let again = call(method::PROXY_START, json!({})).await.unwrap_err();
+        assert_eq!(again.code, ErrorCode::InvalidState as i64);
+
+        call(method::PROXY_STOP, json!({})).await.unwrap();
+        assert!(!*instance.proxy_running().borrow());
+        let stopped = call(method::PROXY_STOP, json!({})).await.unwrap_err();
+        assert_eq!(stopped.code, ErrorCode::InvalidState as i64);
+
+        // The CA is generated once.
+        let restarted = call(method::PROXY_START, json!({"listen": ["127.0.0.1:0"]}))
+            .await
+            .unwrap();
+        assert_eq!(restarted["ca_generated"], false);
+        assert_eq!(restarted["ca_sha256"], started["ca_sha256"]);
+
+        let unknown = call("nope", json!({})).await.unwrap_err();
+        assert_eq!(unknown.code, ErrorCode::MethodNotFound as i64);
+        let bad = call(method::PROXY_START, json!({"listen": "x"}))
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code, ErrorCode::InvalidParams as i64);
+
+        call(method::INSTANCE_SHUTDOWN, json!({})).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            instance.shutdown_token().cancelled(),
+        )
+        .await
+        .unwrap();
+    }
+}

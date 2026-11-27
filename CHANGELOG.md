@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Control plane (ADR 0004): every running Hiccup is an instance that other `hiccup` commands control.
+  - `hiccup-control`: JSON-RPC 2.0 over a Unix socket (`0600`, in a `0700` directory) or a Windows named pipe restricted to its owner, with server-push notifications and a per-user instance registry. The API reference (`docs/control-api.md`) is generated from the code.
+  - `hiccup serve` runs a headless instance. `hiccup proxy start|stop|status` and `hiccup instance list|stop` control it. `proxy start --foreground` is an instance too.
+  - Global options: `--instance NAME` (`HICCUP_INSTANCE`), `--json`, and `--runtime-dir` (`HICCUP_RUNTIME_DIR`).
+  - `hiccup ca info --json`.
 - Upstream connection options for `hiccup proxy start`:
   - `--verify-upstream` verifies server certificates against the OS trust store. It is off by default, and startup warns about it.
   - `--upstream-tls-min` and `--upstream-tls-max` take 1.2 or 1.3; rustls cannot reach TLS 1.0/1.1-only servers.
