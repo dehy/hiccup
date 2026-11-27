@@ -123,6 +123,76 @@ impl AbsoluteTarget {
     }
 }
 
+/// A host name pattern: `*` (any host), `*.example.com` (any subdomain of
+/// `example.com`, not `example.com` itself) or an exact host. Matching is
+/// case-insensitive; IPv6 literals may be bracketed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostPattern {
+    /// Matches every host.
+    Any,
+    /// Matches hosts ending with `.suffix`. Stored lowercase.
+    Subdomains(String),
+    /// Matches this host only. Stored lowercase, without brackets.
+    Exact(String),
+}
+
+impl HostPattern {
+    /// Whether `host` matches.
+    #[must_use]
+    pub fn matches(&self, host: &str) -> bool {
+        let host = host.trim_matches(|c| c == '[' || c == ']');
+        match self {
+            Self::Any => true,
+            Self::Exact(h) => host.eq_ignore_ascii_case(h),
+            Self::Subdomains(suffix) => {
+                host.len() > suffix.len() + 1 && {
+                    let (sub, rest) = host.split_at(host.len() - suffix.len());
+                    sub.ends_with('.') && rest.eq_ignore_ascii_case(suffix)
+                }
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for HostPattern {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim().to_ascii_lowercase();
+        if s == "*" {
+            return Ok(Self::Any);
+        }
+        let (pattern, host) = match s.strip_prefix("*.") {
+            Some(suffix) => (Self::Subdomains(suffix.to_owned()), suffix),
+            None => {
+                let host = s.trim_start_matches('[').trim_end_matches(']');
+                (Self::Exact(host.to_owned()), host)
+            }
+        };
+        let valid = !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'));
+        if valid {
+            Ok(pattern)
+        } else {
+            Err(format!(
+                "invalid host pattern {s:?}: expected `*`, `*.example.com` or a host name"
+            ))
+        }
+    }
+}
+
+impl fmt::Display for HostPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Any => f.write_str("*"),
+            Self::Subdomains(s) => write!(f, "*.{s}"),
+            Self::Exact(h) => f.write_str(h),
+        }
+    }
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -171,6 +241,24 @@ mod tests {
         }
         assert_eq!(auth("::1", 443).to_string(), "[::1]:443");
         assert_eq!(auth("a", 1).to_string(), "a:1");
+    }
+
+    #[test]
+    fn host_patterns() {
+        let p = |s: &str| s.parse::<HostPattern>().unwrap();
+        assert!(p("*").matches("anything.test"));
+        assert!(p("example.com").matches("EXAMPLE.com"));
+        assert!(!p("example.com").matches("www.example.com"));
+        assert!(p("*.Example.com").matches("www.example.com"));
+        assert!(p("*.example.com").matches("a.b.example.com"));
+        assert!(!p("*.example.com").matches("example.com"));
+        assert!(!p("*.example.com").matches("badexample.com"));
+        assert!(p("[::1]").matches("::1"));
+        assert!(p("::1").matches("[::1]"));
+        for bad in ["", "*.", "a b", "*example.com", "a/b"] {
+            assert!(bad.parse::<HostPattern>().is_err(), "{bad:?}");
+        }
+        assert_eq!(p("*.EXAMPLE.com").to_string(), "*.example.com");
     }
 
     #[test]

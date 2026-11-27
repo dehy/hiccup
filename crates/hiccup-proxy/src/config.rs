@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use hiccup_http::Limits;
 
+use crate::HostPattern;
+
 /// Configuration of a [`crate::Proxy`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyConfig {
@@ -24,6 +26,10 @@ pub struct ProxyConfig {
     pub read_timeout: Duration,
     /// How long in-flight exchanges may continue after shutdown is requested.
     pub shutdown_grace: Duration,
+    /// Hosts whose `CONNECT` tunnels are relayed without TLS interception,
+    /// for example clients that pin certificates. Only relevant when a CA is
+    /// set with [`crate::Proxy::intercept_tls`].
+    pub tls_passthrough: Vec<HostPattern>,
 }
 
 impl ProxyConfig {
@@ -41,6 +47,7 @@ impl Default for ProxyConfig {
             idle_timeout: Duration::from_secs(60),
             read_timeout: Duration::from_secs(60),
             shutdown_grace: Duration::from_secs(5),
+            tls_passthrough: Vec::new(),
         }
     }
 }

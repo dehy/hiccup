@@ -7,13 +7,20 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-fn hiccup() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_hiccup"))
+/// `hiccup` with a throwaway data directory, so that tests never touch the
+/// user's CA.
+fn hiccup(data_dir: &tempfile::TempDir) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_hiccup"));
+    cmd.arg("--data-dir")
+        .arg(data_dir.path())
+        .env_remove("HICCUP_DATA_DIR");
+    cmd
 }
 
 #[test]
 fn without_foreground_explains_and_fails() {
-    let out = hiccup().args(["proxy", "start"]).output().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let out = hiccup(&data).args(["proxy", "start"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--foreground"), "{stderr}");
@@ -32,19 +39,26 @@ fn foreground_proxy_forwards_a_request() {
             .unwrap();
     });
 
-    let mut child = hiccup()
+    let data = tempfile::tempdir().unwrap();
+    let mut child = hiccup(&data)
         .args(["proxy", "start", "--foreground", "--listen", "127.0.0.1:0"])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    stderr.read_line(&mut line).unwrap();
-    let addr = line
-        .trim()
-        .strip_prefix("Hiccup proxy listening on http://")
-        .unwrap_or_else(|| panic!("unexpected first line: {line:?}"))
-        .to_owned();
+    let addr = loop {
+        let mut line = String::new();
+        assert!(
+            stderr.read_line(&mut line).unwrap() > 0,
+            "no listening line"
+        );
+        if let Some(addr) = line
+            .trim()
+            .strip_prefix("Hiccup proxy listening on http://")
+        {
+            break addr.to_owned();
+        }
+    };
 
     let mut client = TcpStream::connect(&addr).unwrap();
     client

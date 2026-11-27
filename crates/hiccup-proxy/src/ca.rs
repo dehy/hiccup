@@ -21,8 +21,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SerialNumber,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType, SerialNumber,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use time::{Duration, OffsetDateTime};
@@ -36,6 +36,9 @@ pub const KEY_FILE: &str = "ca-key.pem";
 const VALIDITY: Duration = Duration::days(3650);
 /// Backdating of `notBefore`, to tolerate clients with a slow clock.
 const BACKDATE: Duration = Duration::days(1);
+/// How long a leaf certificate is valid. Apple platforms reject server
+/// certificates valid for more than 825 days, even from a local CA.
+const LEAF_VALIDITY: Duration = Duration::days(365);
 
 /// Why the CA cannot be loaded, generated or saved.
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +77,9 @@ pub enum CaError {
     /// Certificate generation failed.
     #[error("cannot generate the CA: {0}")]
     Generate(#[from] rcgen::Error),
+    /// The TLS configuration for a certificate cannot be built.
+    #[error("cannot set up TLS: {0}")]
+    Tls(String),
 }
 
 /// Information about a CA certificate, for display.
@@ -94,7 +100,6 @@ pub struct CertificateAuthority {
     cert_pem: String,
     cert_der: Vec<u8>,
     key_pem: String,
-    #[allow(dead_code)] // Signs leaf certificates (TLS interception, #10).
     issuer: Issuer<'static, KeyPair>,
 }
 
@@ -115,11 +120,7 @@ impl CertificateAuthority {
     /// Fails only if the platform cannot provide randomness or sign.
     pub fn generate() -> Result<Self, CaError> {
         let now = OffsetDateTime::now_utc();
-        let mut serial = [0u8; 16];
-        SystemRandom::new()
-            .fill(&mut serial)
-            .map_err(|_| rcgen::Error::RingUnspecified)?;
-        serial[0] &= 0x7f; // A positive integer (RFC 5280 §4.1.2.2).
+        let serial = random_serial()?;
 
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Hiccup CA");
@@ -231,6 +232,26 @@ impl CertificateAuthority {
         write_atomically(&dir.join(CERT_FILE), self.cert_pem.as_bytes(), false)
     }
 
+    /// Signs a server certificate for `host` (a DNS name or an IP literal)
+    /// with the public key of `key`. Returns it in DER format.
+    pub(crate) fn sign_leaf(&self, host: &str, key: &KeyPair) -> Result<Vec<u8>, rcgen::Error> {
+        let now = OffsetDateTime::now_utc();
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, host);
+        params.subject_alt_names = vec![match host.parse() {
+            Ok(ip) => SanType::IpAddress(ip),
+            Err(_) => SanType::DnsName(host.try_into()?),
+        }];
+        params.serial_number = Some(SerialNumber::from_slice(&random_serial()?));
+        params.not_before = now - BACKDATE;
+        params.not_after = now + LEAF_VALIDITY;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.use_authority_key_identifier_extension = true;
+        Ok(params.signed_by(key, &self.issuer)?.der().to_vec())
+    }
+
     /// The certificate in PEM format.
     #[must_use]
     pub fn cert_pem(&self) -> &str {
@@ -258,6 +279,16 @@ impl CertificateAuthority {
             sha256,
         }
     }
+}
+
+/// A random positive 127-bit serial number (RFC 5280 §4.1.2.2).
+fn random_serial() -> Result<[u8; 16], rcgen::Error> {
+    let mut serial = [0u8; 16];
+    SystemRandom::new()
+        .fill(&mut serial)
+        .map_err(|_| rcgen::Error::RingUnspecified)?;
+    serial[0] &= 0x7f;
+    Ok(serial)
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, CaError> {
@@ -341,14 +372,26 @@ mod tests {
         let ca = CertificateAuthority::load(dir.path()).unwrap().unwrap();
 
         let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-        let leaf = CertificateParams::new(vec!["example.com".to_owned()])
-            .unwrap()
-            .signed_by(&leaf_key, &ca.issuer)
-            .unwrap();
-        let (_, leaf) = x509_parser::parse_x509_certificate(leaf.der()).unwrap();
         let (_, root) = x509_parser::parse_x509_certificate(ca.cert_der()).unwrap();
-        assert_eq!(leaf.issuer(), root.subject());
-        leaf.verify_signature(Some(root.public_key())).unwrap();
+        for (host, san) in [
+            ("example.com", "DNSName(\"example.com\")"),
+            ("127.0.0.1", "IPAddress([127, 0, 0, 1])"),
+            (
+                "::1",
+                "IPAddress([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])",
+            ),
+        ] {
+            let der = ca.sign_leaf(host, &leaf_key).unwrap();
+            let (_, leaf) = x509_parser::parse_x509_certificate(&der).unwrap();
+            assert_eq!(leaf.issuer(), root.subject());
+            leaf.verify_signature(Some(root.public_key())).unwrap();
+            let sans = leaf.subject_alternative_name().unwrap().unwrap();
+            assert_eq!(
+                format!("{:?}", sans.value.general_names),
+                format!("[{san}]")
+            );
+            assert!(!leaf.is_ca());
+        }
     }
 
     #[test]

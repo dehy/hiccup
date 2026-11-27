@@ -8,9 +8,10 @@ use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use hiccup_proxy::{Proxy, ProxyConfig};
+use hiccup_proxy::{HostPattern, Proxy, ProxyConfig};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -64,13 +65,22 @@ struct StartArgs {
     /// Address to listen on. Repeat to listen on several addresses.
     #[arg(long = "listen", value_name = "ADDR", default_value = "127.0.0.1:8080")]
     listen: Vec<SocketAddr>,
+
+    /// Relay HTTPS to matching hosts without intercepting it, e.g. for clients
+    /// that pin certificates. `*.example.com` matches subdomains, `*` every
+    /// host. Repeat for several patterns.
+    #[arg(long, value_name = "PATTERN")]
+    tls_passthrough: Vec<HostPattern>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(cli.verbose);
     match cli.command {
-        Command::Proxy(ProxyCommand::Start(args)) => proxy_start(args),
+        Command::Proxy(ProxyCommand::Start(args)) => match data_dir(cli.data_dir) {
+            Some(dir) => proxy_start(args, &dir),
+            None => ExitCode::FAILURE,
+        },
         Command::Ca(command) => match data_dir(cli.data_dir) {
             Some(dir) => ca::run(command, &dir),
             None => ExitCode::FAILURE,
@@ -101,7 +111,7 @@ fn init_logging(verbose: u8) {
         .init();
 }
 
-fn proxy_start(args: StartArgs) -> ExitCode {
+fn proxy_start(args: StartArgs, data_dir: &std::path::Path) -> ExitCode {
     if !args.foreground {
         eprintln!(
             "hiccup: starting the proxy in a running instance needs the control API, which is \
@@ -110,6 +120,10 @@ fn proxy_start(args: StartArgs) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+
+    let Some(ca) = ca::load(data_dir) else {
+        return ExitCode::FAILURE;
+    };
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -121,9 +135,14 @@ fn proxy_start(args: StartArgs) -> ExitCode {
     runtime.block_on(async {
         let config = ProxyConfig {
             listen: args.listen,
+            tls_passthrough: args.tls_passthrough,
             ..ProxyConfig::default()
         };
-        let proxy = match Proxy::bind(config).await {
+        let proxy = match Proxy::bind(config)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|p| p.intercept_tls(Arc::new(ca)).map_err(|e| e.to_string()))
+        {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("hiccup: {e}");
@@ -133,6 +152,11 @@ fn proxy_start(args: StartArgs) -> ExitCode {
         for addr in proxy.local_addrs() {
             eprintln!("Hiccup proxy listening on http://{addr}");
         }
+        eprintln!(
+            "HTTPS is intercepted with the Hiccup CA ({}). Upstream certificates are not \
+             verified.",
+            ca::INSTALL_GUIDE
+        );
         eprintln!("Press Ctrl+C to stop.");
 
         let shutdown = CancellationToken::new();
