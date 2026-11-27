@@ -482,9 +482,10 @@ async fn binding_fails_cleanly_when_the_port_is_taken() {
 /// HTTP and a CONNECT tunnel. Skipped when curl is not installed.
 #[tokio::test(flavor = "multi_thread")]
 async fn curl_through_the_proxy() {
-    if std::process::Command::new("curl")
+    if tokio::process::Command::new("curl")
         .arg("--version")
         .output()
+        .await
         .is_err()
     {
         eprintln!("curl not found; skipping");
