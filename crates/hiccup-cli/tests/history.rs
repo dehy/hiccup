@@ -116,12 +116,76 @@ fn recorded_listed_shown_exported_and_kept() {
     assert_eq!(lines.len(), 2);
     assert_eq!(decode(&lines[1]["response"]), RESPONSE);
 
+    // As text: a table, the exchange, one message exactly.
+    let text = |args: &[&str]| {
+        let out = env.run(args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let (table, _) = text(&["history", "list"]);
+    assert!(table.starts_with("    ID  METHOD"), "{table}");
+    // The response size counts its head and body.
+    let row = table.lines().find(|l| l.contains("/first")).unwrap();
+    let columns: Vec<_> = row.split_whitespace().collect();
+    assert_eq!(
+        &columns[1..5],
+        ["GET", "200", &RESPONSE.len().to_string(), "B"],
+        "{row}"
+    );
+    let (_, hint) = text(&["history", "list", "--limit", "1"]);
+    assert!(
+        hint.contains("--before"),
+        "a full page says how to get the next"
+    );
+    let (shown, _) = text(&["history", "show", &id]);
+    assert!(
+        shown.starts_with(&format!("# {id} GET http://{origin}/first\n")),
+        "{shown}"
+    );
+    assert!(shown.ends_with("origin"), "{shown}");
+    assert_eq!(text(&["history", "show", &id, "--request"]).0, first);
+
+    // A failed exchange: recorded with its error, and no response.
+    let mut s = TcpStream::connect(&proxy).unwrap();
+    s.write_all(b"GET http://127.0.0.1:0/down HTTP/1.1\r\n\r\n")
+        .unwrap();
+    s.read_to_end(&mut Vec::new()).unwrap();
+    let failed = list(&env, 3, &[]);
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot connect")
+    );
+    let failed_id = failed[0]["id"].as_u64().unwrap().to_string();
+    assert!(text(&["history", "list"]).0.contains(" error "));
+    assert!(
+        text(&["history", "show", &failed_id])
+            .0
+            .contains("(failed: ")
+    );
+    let refused = |args: &[&str], expected: &str| {
+        let out = env.run(args);
+        assert!(!out.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    };
+    refused(
+        &["history", "show", &failed_id, "--response"],
+        "has no response",
+    );
+    refused(&["history", "show", "999"], "no recorded exchange 999");
+    refused(&["history", "list", "--limit", "2000"], "above 1000");
+
     // History survives a restart of the instance.
     assert!(env.run(&["instance", "stop"]).status.success());
     assert!(wait_exit(&mut serve.0).success());
     let (again, _stderr) = env.spawn(&["--project", project, "serve"], "is running");
     let mut serve = Serving(again);
-    assert_eq!(list(&env, 2, &[]).len(), 2);
+    assert_eq!(list(&env, 3, &[]).len(), 3);
     assert!(env.run(&["instance", "stop"]).status.success());
     assert!(wait_exit(&mut serve.0).success());
 }
