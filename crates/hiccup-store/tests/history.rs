@@ -138,6 +138,22 @@ fn filters_and_pages() {
     assert_eq!(ids(search(b"hello")), [a], "response bodies");
     assert_eq!(ids(search(b"HELLO")), Vec::<i64>::new());
 
+    // Scope rules see the target as received (absolute-form here).
+    let scope = hiccup_proxy::Scope {
+        rules: vec![hiccup_proxy::ScopeRule {
+            exclude: false,
+            scheme: None,
+            host: "a.test".parse().unwrap(),
+            port: Some(80),
+            path: Some(regex::Regex::new("^/login").unwrap()),
+        }],
+    };
+    let scoped = Filter {
+        scope: Some(scope),
+        ..Filter::default()
+    };
+    assert_eq!(ids(scoped), [c], "a.test:80 and /login");
+
     let page = store.list(&Filter::default(), None, 2).unwrap();
     assert_eq!(page.len(), 2);
     let next = store.list(&Filter::default(), Some(page[1].id), 2).unwrap();

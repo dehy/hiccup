@@ -560,6 +560,7 @@ dependencies = [
  "bytes",
  "hiccup-http",
  "hiccup-proxy",
+ "regex",
  "rusqlite",
  "tempfile",
  "thiserror",

@@ -10,12 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hiccup_control::api::{
     ForwardAllResult, ForwardParams, InstanceInfo, InterceptSettingsParams, InterceptStatus,
     ItemParams, PendingItem, PendingSummary, ProxyStartParams, ProxyStartResult, ProxyStatus,
-    method,
+    ScopeRemoveParams, ScopeRuleParams, ScopeRules, ScopeTestParams, ScopeTestResult, method,
 };
 use hiccup_control::{API_VERSION, BoxFuture, ErrorCode, Handler, RpcError};
 use hiccup_proxy::{
-    CertificateAuthority, Direction, Exchange, InterceptError, InterceptQueue, Pending, Proxy,
-    Verdict,
+    AbsoluteTarget, CertificateAuthority, Direction, Exchange, InterceptError, InterceptQueue,
+    Pending, Proxy, Scheme, Scope, ScopeTarget, Verdict,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -220,6 +220,51 @@ impl Instance {
         })
     }
 
+    fn scope_rules(scope: &Scope) -> ScopeRules {
+        ScopeRules {
+            rules: scope
+                .rules
+                .iter()
+                .map(crate::params::scope_params)
+                .collect(),
+        }
+    }
+
+    fn add_scope_rule(&self, params: &ScopeRuleParams) -> Result<ScopeRules, RpcError> {
+        let rule = crate::params::scope_rule(params)?;
+        Ok(self.intercept.update_scope(|scope| {
+            scope.rules.push(rule);
+            Self::scope_rules(scope)
+        }))
+    }
+
+    fn remove_scope_rule(&self, index: usize) -> Result<ScopeRules, RpcError> {
+        self.intercept.update_scope(|scope| {
+            if index >= scope.rules.len() {
+                return Err(RpcError::invalid_params(format!(
+                    "no scope rule {index} (there are {})",
+                    scope.rules.len()
+                )));
+            }
+            scope.rules.remove(index);
+            Ok(Self::scope_rules(scope))
+        })
+    }
+
+    fn test_scope(&self, url: &str) -> Result<ScopeTestResult, RpcError> {
+        let (https, target) = AbsoluteTarget::parse_url(url.as_bytes()).map_err(|_| {
+            RpcError::invalid_params(format!("{url:?} is not an http:// or https:// URL"))
+        })?;
+        let path = String::from_utf8_lossy(&target.origin_form);
+        let in_scope = self.intercept.scope().contains(&ScopeTarget {
+            scheme: if https { Scheme::Https } else { Scheme::Http },
+            host: &target.authority.host,
+            port: target.authority.port,
+            path: &path,
+        });
+        Ok(ScopeTestResult { in_scope })
+    }
+
     fn forward(&self, params: ForwardParams) -> Result<Value, RpcError> {
         let verdict = match params.raw {
             None => Verdict::Forward,
@@ -294,6 +339,16 @@ impl Handler for Instance {
                 method::INTERCEPT_FORWARD_ALL => reply(&ForwardAllResult {
                     forwarded: self.intercept.forward_all(),
                 }),
+                method::SCOPE_LIST => reply(&Self::scope_rules(&self.intercept.scope())),
+                method::SCOPE_ADD => reply(&self.add_scope_rule(&parse(params)?)?),
+                method::SCOPE_REMOVE => {
+                    let ScopeRemoveParams { index } = parse(params)?;
+                    reply(&self.remove_scope_rule(index)?)
+                }
+                method::SCOPE_TEST => {
+                    let ScopeTestParams { url } = parse(params)?;
+                    reply(&self.test_scope(&url)?)
+                }
                 _ => Err(RpcError::new(
                     ErrorCode::MethodNotFound,
                     format!("unknown method {method:?}"),

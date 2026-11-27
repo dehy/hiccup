@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use hiccup_control::RpcError;
 use hiccup_control::api::{
-    HostRule, InterceptRulesParams, InterceptSettingsParams, ProxyStartParams,
+    HostRule, InterceptRulesParams, InterceptSettingsParams, ProxyStartParams, ScopeRuleParams,
 };
 use hiccup_proxy::{
-    ClientCert, HostPattern, InterceptRules, InterceptSettings, ProxyConfig, TimeoutAction,
-    TlsVersion, UpstreamConfig,
+    ClientCert, HostPattern, InterceptRules, InterceptSettings, ProxyConfig, Scheme, ScopeRule,
+    TimeoutAction, TlsVersion, UpstreamConfig,
 };
 
 /// Upper bound on a compiled intercept regex (the `regex` crate has linear
@@ -33,16 +33,8 @@ pub(crate) fn intercept_settings(
                 .map(|h| h.parse().map_err(invalid))
                 .collect::<Result<_, _>>()?,
             methods: r.methods.iter().map(|m| m.to_ascii_uppercase()).collect(),
-            path: r
-                .path
-                .as_deref()
-                .map(|p| {
-                    regex::RegexBuilder::new(p)
-                        .size_limit(REGEX_SIZE_LIMIT)
-                        .build()
-                        .map_err(|e| invalid(format!("invalid path regex: {e}")))
-                })
-                .transpose()?,
+            path: r.path.as_deref().map(path_regex).transpose()?,
+            in_scope: r.in_scope,
         }))
     };
     let action = match params.on_timeout.as_deref() {
@@ -73,6 +65,7 @@ pub(crate) fn intercept_params(settings: &InterceptSettings) -> InterceptSetting
             hosts: r.hosts.iter().map(ToString::to_string).collect(),
             methods: r.methods.clone(),
             path: r.path.as_ref().map(|re| re.as_str().to_owned()),
+            in_scope: r.in_scope,
         })
     };
     InterceptSettingsParams {
@@ -88,6 +81,56 @@ pub(crate) fn intercept_params(settings: &InterceptSettings) -> InterceptSetting
             }
             .to_owned()
         }),
+    }
+}
+
+fn path_regex(pattern: &str) -> Result<regex::Regex, RpcError> {
+    regex::RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|e| RpcError::invalid_params(format!("invalid path regex: {e}")))
+}
+
+/// Builds a scope rule from `scope.add` parameters.
+pub(crate) fn scope_rule(params: &ScopeRuleParams) -> Result<ScopeRule, RpcError> {
+    let scheme = match params.protocol.as_deref() {
+        None => None,
+        Some(p) if p.eq_ignore_ascii_case("http") => Some(Scheme::Http),
+        Some(p) if p.eq_ignore_ascii_case("https") => Some(Scheme::Https),
+        Some(other) => {
+            return Err(RpcError::invalid_params(format!(
+                "invalid protocol {other:?}: expected \"http\" or \"https\""
+            )));
+        }
+    };
+    Ok(ScopeRule {
+        exclude: params.exclude,
+        scheme,
+        host: params
+            .host
+            .as_deref()
+            .unwrap_or("*")
+            .parse()
+            .map_err(RpcError::invalid_params)?,
+        port: params.port,
+        path: params.path.as_deref().map(path_regex).transpose()?,
+    })
+}
+
+/// The inverse of [`scope_rule`], for `scope.list`.
+pub(crate) fn scope_params(rule: &ScopeRule) -> ScopeRuleParams {
+    ScopeRuleParams {
+        exclude: rule.exclude,
+        protocol: rule.scheme.map(|s| {
+            match s {
+                Scheme::Http => "http",
+                Scheme::Https => "https",
+            }
+            .to_owned()
+        }),
+        host: (rule.host != HostPattern::Any).then(|| rule.host.to_string()),
+        port: rule.port,
+        path: rule.path.as_ref().map(|re| re.as_str().to_owned()),
     }
 }
 
@@ -199,12 +242,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scope_rules_round_trip() {
+        let params = ScopeRuleParams {
+            exclude: true,
+            protocol: Some("HTTPS".into()),
+            host: Some("*.test".into()),
+            port: Some(8443),
+            path: Some("^/a".into()),
+        };
+        let back = scope_params(&scope_rule(&params).unwrap());
+        assert_eq!(back.protocol.as_deref(), Some("https"));
+        assert_eq!(
+            (back.host.as_deref(), back.port),
+            (Some("*.test"), Some(8443))
+        );
+        assert!(back.exclude);
+        // No host means any host, and is listed as such.
+        let any = scope_rule(&ScopeRuleParams::default()).unwrap();
+        assert_eq!(scope_params(&any), ScopeRuleParams::default());
+
+        let bad = |p: ScopeRuleParams| scope_rule(&p).unwrap_err().message;
+        assert!(
+            bad(ScopeRuleParams {
+                protocol: Some("ftp".into()),
+                ..params.clone()
+            })
+            .contains("protocol")
+        );
+        assert!(
+            bad(ScopeRuleParams {
+                host: Some("a b".into()),
+                ..params.clone()
+            })
+            .contains("pattern")
+        );
+        assert!(
+            bad(ScopeRuleParams {
+                path: Some("(".into()),
+                ..params
+            })
+            .contains("regex")
+        );
+    }
+
+    #[test]
     fn intercept_settings_round_trip() {
         let params = InterceptSettingsParams {
             requests: Some(InterceptRulesParams {
                 hosts: vec!["*.test".into()],
                 methods: vec!["post".into()],
                 path: Some("^/api/".into()),
+                in_scope: true,
             }),
             responses: None,
             timeout_ms: Some(1500),
@@ -213,6 +301,7 @@ mod tests {
         let settings = intercept_settings(&params).unwrap();
         let back = intercept_params(&settings);
         assert_eq!(back.requests.as_ref().unwrap().methods, ["POST"]);
+        assert!(back.requests.as_ref().unwrap().in_scope);
         assert_eq!(back.timeout_ms, Some(1500));
         assert_eq!(back.on_timeout.as_deref(), Some("drop"));
 

@@ -6,6 +6,7 @@ mod ca;
 mod instance;
 mod intercept;
 mod proxy;
+mod scope;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -67,6 +68,9 @@ enum Command {
     /// Hold requests and responses to inspect, edit, forward or drop them.
     #[command(subcommand)]
     Intercept(intercept::InterceptCommand),
+    /// Which URLs are being tested.
+    #[command(subcommand)]
+    Scope(scope::ScopeCommand),
     /// Running Hiccup instances.
     #[command(subcommand)]
     Instance(instance::InstanceCommand),
@@ -119,6 +123,7 @@ fn main() -> ExitCode {
         Command::Serve => instance::serve(&globals),
         Command::Proxy(command) => proxy::run(command, &globals),
         Command::Intercept(command) => intercept::run(command, &globals),
+        Command::Scope(command) => scope::run(command, &globals),
         Command::Instance(command) => instance::run(command, &globals),
         Command::Ca(command) => match globals.data_dir() {
             Some(dir) => ca::run(command, &dir, globals.json),

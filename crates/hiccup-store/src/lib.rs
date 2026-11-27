@@ -10,7 +10,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use hiccup_proxy::{Exchange, Modification};
+use hiccup_proxy::{Exchange, Modification, Scheme, Scope, ScopeTarget};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 /// Schema migrations, in order. The database's `user_version` counts those
@@ -84,6 +85,8 @@ pub struct Filter {
     // shortcut: a full scan of every message (~25 ms per 20 MB); add an index
     // (e.g. FTS5 on decoded text) when projects get large.
     pub search: Option<Vec<u8>>,
+    /// Only exchanges in this scope.
+    pub scope: Option<Scope>,
 }
 
 /// One exchange, without its messages.
@@ -267,6 +270,30 @@ impl Store {
         before: Option<i64>,
         limit: u32,
     ) -> Result<Vec<Summary>, StoreError> {
+        // The scope is Rust code: SQLite calls it per row. Registered on
+        // every call, since the scope changes.
+        let scope = filter.scope.clone();
+        self.db.create_scalar_function(
+            "in_scope",
+            4,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            move |ctx| {
+                let Some(scope) = &scope else { return Ok(true) };
+                let tls: bool = ctx.get(0)?;
+                let (host, upstream, target): (String, String, String) =
+                    (ctx.get(1)?, ctx.get(2)?, ctx.get(3)?);
+                let port = upstream
+                    .rsplit_once(':')
+                    .and_then(|(_, p)| p.parse().ok())
+                    .unwrap_or(if tls { 443 } else { 80 });
+                Ok(scope.contains(&ScopeTarget {
+                    scheme: if tls { Scheme::Https } else { Scheme::Http },
+                    host: &host,
+                    port,
+                    path: &target,
+                }))
+            },
+        )?;
         let mut query = self.db.prepare_cached(&format!(
             "SELECT {SUMMARY} FROM exchanges e
              WHERE (?1 IS NULL OR e.id < ?1)
@@ -279,6 +306,7 @@ impl Store {
                    WHERE b.id IN (e.request_blob, e.forwarded_blob, e.response_blob,
                                   e.delivered_blob)
                      AND instr(b.data, ?6) > 0))
+               AND (NOT ?8 OR in_scope(e.tls, e.host, e.upstream, e.target))
              ORDER BY e.id DESC
              LIMIT ?7"
         ))?;
@@ -291,6 +319,7 @@ impl Store {
                 filter.mime.as_deref().map(str::to_ascii_lowercase),
                 filter.search,
                 limit,
+                filter.scope.is_some(),
             ],
             summary,
         )?;
