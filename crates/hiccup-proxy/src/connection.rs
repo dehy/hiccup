@@ -311,7 +311,9 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let framing = response.framing().framing;
-    let mut keep_client = keep_alive(exchange.received.head()) && keep_alive(response.head());
+    let received = exchange.received.head();
+    let mut keep_client = keep_alive(received, received.version().unwrap_or_default())
+        && keep_alive(response.head(), response.head().version());
     // Edited bytes may hold more than one request, or frame it differently:
     // the connection may then carry responses that belong to none of ours.
     let request_edited = exchange
@@ -536,13 +538,9 @@ fn rewrite_target(request: &Request, target: &AbsoluteTarget) -> (Bytes, Modific
     (Bytes::from(out), modification)
 }
 
-/// Whether the sender of `head` expects the connection to stay open
-/// (RFC 9112 §9.3).
-fn keep_alive(head: &Head) -> bool {
-    let version = head
-        .as_bytes()
-        .get(head.start_line().content.start..head.start_line().content.end)
-        .unwrap_or_default();
+/// Whether the sender of `head`, which has this HTTP `version`, expects the
+/// connection to stay open (RFC 9112 §9.3).
+fn keep_alive(head: &Head, version: &[u8]) -> bool {
     let has = |token: &str| {
         head.get_all("connection").any(|h| {
             h.value()
@@ -554,8 +552,7 @@ fn keep_alive(head: &Head) -> bool {
         return false;
     }
     // HTTP/1.1 is persistent by default; HTTP/1.0 only with keep-alive.
-    let http11 = version.windows(8).any(|w| w == b"HTTP/1.1");
-    http11 || has("keep-alive")
+    version == b"HTTP/1.1" || has("keep-alive")
 }
 
 /// Errors that mean the peer had already closed the connection.
@@ -825,25 +822,33 @@ async fn linger<S: AsyncRead + Unpin>(client: &mut S) {
 mod tests {
     use super::*;
 
-    fn head(raw: &[u8]) -> hiccup_http::RequestHead {
-        hiccup_http::RequestHead::parse(raw, &Limits::DEFAULT)
+    fn request(raw: &[u8]) -> bool {
+        let head = hiccup_http::RequestHead::parse(raw, &Limits::DEFAULT)
             .unwrap()
+            .unwrap();
+        keep_alive(&head, head.version().unwrap_or_default())
+    }
+
+    fn response(raw: &[u8]) -> bool {
+        let head = hiccup_http::ResponseHead::parse(raw, &Limits::DEFAULT)
             .unwrap()
+            .unwrap();
+        keep_alive(&head, head.version())
     }
 
     #[test]
     fn keep_alive_rules() {
-        assert!(keep_alive(&head(b"GET / HTTP/1.1\r\n\r\n")));
-        assert!(!keep_alive(&head(
-            b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n"
-        )));
-        assert!(!keep_alive(&head(
+        assert!(request(b"GET / HTTP/1.1\r\n\r\n"));
+        assert!(!request(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n"));
+        assert!(!request(
             b"GET / HTTP/1.1\r\nConnection: Upgrade, Close\r\n\r\n"
-        )));
-        assert!(!keep_alive(&head(b"GET / HTTP/1.0\r\n\r\n")));
-        assert!(keep_alive(&head(
-            b"GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"
-        )));
+        ));
+        assert!(!request(b"GET / HTTP/1.0\r\n\r\n"));
+        assert!(request(b"GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"));
+        // Only the version field counts, not the target or reason phrase.
+        assert!(!request(b"GET /?v=HTTP/1.1 HTTP/1.0\r\n\r\n"));
+        assert!(!response(b"HTTP/1.0 200 HTTP/1.1 OK\r\n\r\n"));
+        assert!(response(b"HTTP/1.1 200 OK\r\n\r\n"));
     }
 
     #[test]

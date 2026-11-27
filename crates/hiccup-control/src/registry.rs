@@ -197,6 +197,16 @@ impl Registry {
             return Err(RegisterError::InvalidName(name.to_owned()));
         }
         create_private_dir(&self.dir)?;
+        // Held while the instance runs, and released by the OS if it dies:
+        // two instances starting at once cannot both take the name.
+        let lock = fs::File::create(self.dir.join(format!("{name}.lock")))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(RegisterError::AlreadyRunning(name.to_owned()));
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
         if let Some(existing) = self.records()?.into_iter().find(|r| r.name == name) {
             if probe(&existing.endpoint).await != Probe::Dead {
                 return Err(RegisterError::AlreadyRunning(name.to_owned()));
@@ -224,6 +234,7 @@ impl Registry {
             registry: self.clone(),
             record,
             listener: Some(listener),
+            _lock: lock,
         })
     }
 
@@ -266,6 +277,8 @@ pub struct Registration {
     registry: Registry,
     record: InstanceRecord,
     listener: Option<Listener>,
+    /// The name's lock, released (after the files are removed) on drop.
+    _lock: fs::File,
 }
 
 impl Registration {
@@ -508,14 +521,41 @@ mod tests {
         assert!(registry.records().unwrap().is_empty());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn instances_starting_together_get_one_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path().join("run"));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let registry = registry.clone();
+                tokio::spawn(async move { registry.register("x").await })
+            })
+            .collect();
+        let mut registered = Vec::new();
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(r) => registered.push(r),
+                Err(RegisterError::AlreadyRunning(_)) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(registered.len(), 1);
+        assert_eq!(
+            registry.live().await.unwrap(),
+            [registered[0].record().clone()]
+        );
+    }
+
     #[tokio::test]
     async fn stale_entries_are_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let registry = Registry::new(dir.path());
-        let mut stale = registry.register("x").await.unwrap();
-        // Simulate a crash: the endpoint is gone but the files remain.
-        drop(stale.take_listener());
-        std::mem::forget(stale);
+        let stale = registry.register("x").await.unwrap();
+        // Simulate a crash: the endpoint and the lock are gone, the record
+        // remains.
+        let record = fs::read(registry.record_path("x")).unwrap();
+        drop(stale);
+        fs::write(registry.record_path("x"), record).unwrap();
         assert_eq!(registry.records().unwrap().len(), 1);
         assert!(registry.live().await.unwrap().is_empty());
         assert!(registry.records().unwrap().is_empty(), "cleaned up");

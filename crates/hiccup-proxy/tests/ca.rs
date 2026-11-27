@@ -35,7 +35,8 @@ fn save_replaces_the_previous_ca() {
     let loaded = CertificateAuthority::load(dir.path()).unwrap().unwrap();
     assert_eq!(loaded.cert_der(), new.cert_der());
     assert_ne!(loaded.cert_der(), old.cert_der());
-    assert_eq!(files(dir.path()), [CERT_FILE, KEY_FILE]);
+    // No temporary file is left behind (the lock file stays, empty).
+    assert_eq!(files(dir.path()), [CERT_FILE, KEY_FILE, "ca.lock"]);
 }
 
 #[test]
@@ -170,4 +171,23 @@ fn files(dir: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+#[test]
+fn instances_starting_together_share_one_ca() {
+    let dir = tempfile::tempdir().unwrap();
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| CertificateAuthority::load_or_generate(dir.path()).unwrap()))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(
+        results.iter().filter(|(_, generated)| *generated).count(),
+        1
+    );
+    let on_disk = CertificateAuthority::load(dir.path()).unwrap().unwrap();
+    for (ca, _) in &results {
+        assert_eq!(ca.info().sha256, on_disk.info().sha256);
+    }
 }

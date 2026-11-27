@@ -242,6 +242,17 @@ fn print_started(result: &ProxyStartResult) {
         // The first line is parsed by scripts and tests: keep it stable.
         eprintln!("Hiccup proxy listening on http://{addr}");
     }
+    let exposed = result.proxy.listen.iter().any(|a| {
+        a.parse::<std::net::SocketAddr>()
+            .is_ok_and(|a| !a.ip().is_loopback())
+    });
+    if exposed {
+        eprintln!(
+            "WARNING: the proxy is reachable from other machines, without authentication. \
+             Anyone who can reach it can use it, reach services on this machine, and have \
+             HTTPS decrypted with your CA."
+        );
+    }
     if result.ca_generated {
         eprintln!(
             "Generated a new CA (SHA-256 {}). Install it to intercept HTTPS: {}",
