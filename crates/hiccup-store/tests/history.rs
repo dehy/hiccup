@@ -201,13 +201,32 @@ fn an_existing_project_is_made_private() {
     let store = Store::open(&path).unwrap();
     assert_eq!((mode("p.hiccup"), mode("p.hiccup-wal")), (0o600, 0o600));
     drop(store);
+}
 
-    // A symlink: its target is tightened.
-    set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+#[cfg(unix)]
+#[test]
+fn a_project_others_could_swap_is_refused() {
+    use std::fs::{Permissions, set_permissions};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.hiccup");
+    drop(Store::open(&path).unwrap());
+
+    // A symbolic link, even to our own project.
     let link = dir.path().join("link.hiccup");
     std::os::unix::fs::symlink(&path, &link).unwrap();
-    drop(Store::open(&link).unwrap());
-    assert_eq!(mode("p.hiccup"), 0o600);
+    let refused = |p: &std::path::Path| match Store::open(p) {
+        Err(StoreError::Unsafe { reason, .. }) => reason,
+        other => panic!("not refused: {:?}", other.err()),
+    };
+    assert!(refused(&link).contains("symbolic link"));
+
+    // A directory others can write to, unless it is sticky.
+    set_permissions(dir.path(), Permissions::from_mode(0o777)).unwrap();
+    assert!(refused(&path).contains("other users can write"));
+    set_permissions(dir.path(), Permissions::from_mode(0o1777)).unwrap();
+    drop(Store::open(&path).unwrap());
+    set_permissions(dir.path(), Permissions::from_mode(0o700)).unwrap();
 }
 
 #[cfg(windows)]

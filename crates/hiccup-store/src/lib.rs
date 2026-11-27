@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use hiccup_proxy::{Exchange, Modification, Scheme, Scope, ScopeTarget};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 /// Schema migrations, in order. The database's `user_version` counts those
 /// applied. Never edit one that has shipped: append a new one.
@@ -67,6 +67,14 @@ pub enum StoreError {
     /// The project was written by a newer Hiccup.
     #[error("the project uses schema version {0}, newer than this Hiccup supports")]
     TooNew(usize),
+    /// The project's location would let another user swap or read it.
+    #[error("refusing {path}: {reason}")]
+    Unsafe {
+        /// The project path.
+        path: String,
+        /// Why.
+        reason: &'static str,
+    },
 }
 
 /// Which exchanges to list. Every criterion set must match.
@@ -160,6 +168,12 @@ impl Store {
     /// Fails if the file cannot be created or opened, is not a Hiccup
     /// project, or was written by a newer Hiccup.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        // SQLite refuses a link anywhere in the path (`NOFOLLOW` below), and
+        // directories are often links (`/tmp` on macOS): resolve those.
+        #[cfg(unix)]
+        let path = &resolve_dir(path)?;
+        #[cfg(unix)]
+        check_location(path)?;
         // History holds credentials: a new project is readable by its owner
         // only. SQLite gives its -wal and -shm files the same mode.
         #[cfg(unix)]
@@ -170,11 +184,13 @@ impl Store {
         .open(path)?;
         // An existing project (restored, copied, or someone else's) keeps
         // its mode: tighten it too. Fails on a file we do not own.
-        // shortcut: in a directory others can write to, the file can still
-        // be swapped before SQLite opens it; see #53 before wiring in real traffic.
         #[cfg(unix)]
         restrict(path)?;
-        let mut db = Connection::open(path)?;
+        // A symbolic link swapped in since the check is refused here.
+        let mut db = Connection::open_with_flags(
+            path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         // With WAL, NORMAL survives application crashes; only a power loss
         // can lose the last few exchanges.
@@ -402,6 +418,45 @@ fn migrate(db: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// `path` with its directory's symbolic links resolved; the file name is
+/// kept as given.
+#[cfg(unix)]
+fn resolve_dir(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file path"))?;
+    Ok(dir.canonicalize()?.join(name))
+}
+
+/// Refuses a project that another user could swap between our checks and
+/// SQLite opening it: a symbolic link, or in a directory others can write
+/// to (unless it is sticky, like `/tmp`: others cannot rename or delete our
+/// files there, and a file they create first fails `restrict`).
+#[cfg(unix)]
+fn check_location(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+    let unsafe_ = |reason| StoreError::Unsafe {
+        path: path.display().to_string(),
+        reason,
+    };
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(unsafe_("it is a symbolic link; open the file it points to"));
+    }
+    let dir = path.parent().expect("resolved: has a directory");
+    let mode = std::fs::metadata(dir)?.permissions().mode();
+    let sticky = mode & 0o1000 != 0;
+    if mode & 0o022 != 0 && !sticky {
+        return Err(unsafe_(
+            "other users can write to its directory, and could replace it",
+        ));
+    }
+    Ok(())
+}
+
 /// Makes the project and any leftover -wal / -shm files `0600`.
 #[cfg(unix)]
 fn restrict(path: &Path) -> std::io::Result<()> {
@@ -417,6 +472,8 @@ fn restrict(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The directory's ACL is not checked (unlike Unix's `check_location`): a
+/// project in a directory other users can write to is the user's call.
 /// Makes the project's files private: drops what they inherit from their
 /// directory (e.g. `Users`) and grants their owner and `SYSTEM`. What is
 /// left besides is the creating token's default (owner, `SYSTEM`,
