@@ -12,9 +12,17 @@ publish.workspace = true
 [dependencies]
 bytes.workspace = true
 hiccup-http.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

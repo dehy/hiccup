@@ -9,6 +9,9 @@
 //! - Persistent connections on both sides, with upstream reuse per host.
 //! - `CONNECT` tunnels (pass-through; TLS interception comes later).
 //! - Every completed [`Exchange`] is reported to an optional observer.
+//! - A local [`CertificateAuthority`] for TLS interception.
+
+pub mod ca;
 
 mod config;
 mod connection;
@@ -16,6 +19,7 @@ mod exchange;
 mod server;
 mod target;
 
+pub use ca::{CaError, CaInfo, CertificateAuthority};
 pub use config::ProxyConfig;
 pub use exchange::{Exchange, ExchangeObserver, Modification};
 pub use server::Proxy;
