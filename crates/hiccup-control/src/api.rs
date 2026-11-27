@@ -24,6 +24,20 @@ pub mod method {
     pub const PROXY_STOP: &str = "proxy.stop";
     /// Describe the proxy.
     pub const PROXY_STATUS: &str = "proxy.status";
+    /// Describe the intercept settings.
+    pub const INTERCEPT_STATUS: &str = "intercept.status";
+    /// Replace the intercept settings.
+    pub const INTERCEPT_SET: &str = "intercept.set";
+    /// List held items.
+    pub const INTERCEPT_LIST: &str = "intercept.list";
+    /// Show one held item, with its bytes.
+    pub const INTERCEPT_SHOW: &str = "intercept.show";
+    /// Forward a held item, possibly edited.
+    pub const INTERCEPT_FORWARD: &str = "intercept.forward";
+    /// Drop a held item.
+    pub const INTERCEPT_DROP: &str = "intercept.drop";
+    /// Forward every held item unchanged.
+    pub const INTERCEPT_FORWARD_ALL: &str = "intercept.forward_all";
 }
 
 /// Notification names.
@@ -140,6 +154,107 @@ pub struct ProxyStartResult {
     pub ca_sha256: String,
 }
 
+/// Which exchanges to intercept in one direction. Every non-empty criterion
+/// must match the request.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InterceptRulesParams {
+    /// Host patterns (`example.com`, `*.example.com`, `*`); empty: any.
+    pub hosts: Vec<String>,
+    /// Methods; empty: any. Matched case-insensitively.
+    pub methods: Vec<String>,
+    /// A regular expression matched against the request target (path and
+    /// query). Absent: any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Parameters of `intercept.set`, and the result of `intercept.status`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InterceptSettingsParams {
+    /// Request rules; `null` turns request interception off.
+    pub requests: Option<InterceptRulesParams>,
+    /// Response rules; `null` turns response interception off.
+    pub responses: Option<InterceptRulesParams>,
+    /// How long an item may wait, in milliseconds; `null`: forever.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// What happens on timeout: `"forward"` (default) or `"drop"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_timeout: Option<String>,
+}
+
+/// Result of `intercept.status` and `intercept.set`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterceptStatus {
+    /// The settings.
+    #[serde(flatten)]
+    pub settings: InterceptSettingsParams,
+    /// How many items are held.
+    pub pending: usize,
+}
+
+/// A held item, without its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSummary {
+    /// Its ID.
+    pub id: u64,
+    /// `"request"` or `"response"`.
+    pub direction: String,
+    /// The upstream `host:port`.
+    pub upstream: String,
+    /// Whether it is in an intercepted TLS tunnel.
+    pub tls: bool,
+    /// The request method.
+    pub method: String,
+    /// The request target.
+    pub target: String,
+    /// The response status, for responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Size of the held message, in bytes.
+    pub size: usize,
+    /// How long it has been held, in milliseconds.
+    pub age_ms: u64,
+}
+
+/// Result of `intercept.show`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingItem {
+    /// The summary.
+    #[serde(flatten)]
+    pub summary: PendingSummary,
+    /// The exact bytes that would be sent, base64-encoded (RFC 4648).
+    pub raw: String,
+}
+
+/// Parameters naming one held item.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemParams {
+    /// The item ID.
+    pub id: u64,
+}
+
+/// Parameters of `intercept.forward`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForwardParams {
+    /// The item ID.
+    pub id: u64,
+    /// Replacement bytes, base64-encoded, sent exactly. Absent: unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+/// Result of `intercept.forward_all`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardAllResult {
+    /// How many items were forwarded.
+    pub forwarded: usize,
+}
+
 /// Documentation of one method or notification.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageDoc {
@@ -167,6 +282,38 @@ fn example_status() -> ProxyStatus {
         exchanges: 42,
     }
 }
+
+fn example_summary() -> PendingSummary {
+    PendingSummary {
+        id: 7,
+        direction: "request".to_owned(),
+        upstream: "example.com:443".to_owned(),
+        tls: true,
+        method: "POST".to_owned(),
+        target: "/api/login".to_owned(),
+        status: None,
+        size: 412,
+        age_ms: 1500,
+    }
+}
+
+fn example_intercept() -> InterceptStatus {
+    InterceptStatus {
+        settings: InterceptSettingsParams {
+            requests: Some(InterceptRulesParams {
+                hosts: vec!["*.example.com".to_owned()],
+                methods: vec!["POST".to_owned()],
+                path: Some("^/api/".to_owned()),
+            }),
+            responses: None,
+            timeout_ms: None,
+            on_timeout: None,
+        },
+        pending: 1,
+    }
+}
+
+const NOT_FOUND: &[(i64, &str)] = &[(-32001, "no held item has this ID (resolved or timed out)")];
 
 /// Every method.
 pub const METHODS: &[MessageDoc] = &[
@@ -249,6 +396,74 @@ pub const METHODS: &[MessageDoc] = &[
         result: || to_value(&example_status()),
         errors: &[],
     },
+    MessageDoc {
+        name: method::INTERCEPT_STATUS,
+        summary: "Describe the intercept settings. They belong to the instance and apply to its \
+                  proxy whenever it runs.",
+        params: || json!({}),
+        result: || to_value(&example_intercept()),
+        errors: &[],
+    },
+    MessageDoc {
+        name: method::INTERCEPT_SET,
+        summary: "Replace the intercept settings. Items held in a direction that is turned off \
+                  are forwarded unchanged.",
+        params: || to_value(&example_intercept().settings),
+        result: || to_value(&example_intercept()),
+        errors: &[(
+            -32602,
+            "a host pattern, regular expression or timeout is invalid",
+        )],
+    },
+    MessageDoc {
+        name: method::INTERCEPT_LIST,
+        summary: "List the held items, oldest first.",
+        params: || json!({}),
+        result: || json!([to_value(&example_summary())]),
+        errors: &[],
+    },
+    MessageDoc {
+        name: method::INTERCEPT_SHOW,
+        summary: "Show one held item with the exact bytes that would be sent.",
+        params: || to_value(&ItemParams { id: 7 }),
+        result: || {
+            to_value(&PendingItem {
+                summary: example_summary(),
+                raw: "UE9TVCAvYXBpL2xvZ2luIEhUVFAvMS4xDQo…".to_owned(),
+            })
+        },
+        errors: NOT_FOUND,
+    },
+    MessageDoc {
+        name: method::INTERCEPT_FORWARD,
+        summary: "Forward a held item. With `raw`, those bytes are sent instead, exactly as \
+                  given; an edited response closes the client connection after it.",
+        params: || {
+            to_value(&ForwardParams {
+                id: 7,
+                raw: Some("UE9TVCAvYXBpL2xvZ2luIEhUVFAvMS4xDQo…".to_owned()),
+            })
+        },
+        result: || json!({}),
+        errors: &[
+            (-32001, "no held item has this ID (resolved or timed out)"),
+            (-32602, "`raw` is not valid base64"),
+        ],
+    },
+    MessageDoc {
+        name: method::INTERCEPT_DROP,
+        summary: "Drop a held item. The client gets a 502 response from Hiccup.",
+        params: || to_value(&ItemParams { id: 7 }),
+        result: || json!({}),
+        errors: NOT_FOUND,
+    },
+    MessageDoc {
+        name: method::INTERCEPT_FORWARD_ALL,
+        summary: "Forward every held item unchanged.",
+        params: || json!({}),
+        result: || to_value(&ForwardAllResult { forwarded: 3 }),
+        errors: &[],
+    },
 ];
 
 /// Every notification an instance sends.
@@ -324,8 +539,17 @@ mod tests {
     fn examples_match_the_types() {
         for m in METHODS {
             let params = (m.params)();
-            if m.name == method::PROXY_START {
-                serde_json::from_value::<ProxyStartParams>(params).unwrap();
+            match m.name {
+                method::PROXY_START => {
+                    drop(serde_json::from_value::<ProxyStartParams>(params).unwrap())
+                }
+                method::INTERCEPT_SET => {
+                    drop(serde_json::from_value::<InterceptSettingsParams>(params).unwrap());
+                }
+                method::INTERCEPT_FORWARD => {
+                    drop(serde_json::from_value::<ForwardParams>(params).unwrap())
+                }
+                _ => {}
             }
         }
         let start: ProxyStartParams = serde_json::from_value(json!({})).unwrap();

@@ -7,9 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hiccup_control::api::{InstanceInfo, ProxyStartParams, ProxyStartResult, ProxyStatus, method};
+use hiccup_control::api::{
+    ForwardAllResult, ForwardParams, InstanceInfo, InterceptSettingsParams, InterceptStatus,
+    ItemParams, PendingItem, PendingSummary, ProxyStartParams, ProxyStartResult, ProxyStatus,
+    method,
+};
 use hiccup_control::{API_VERSION, BoxFuture, ErrorCode, Handler, RpcError};
-use hiccup_proxy::{CertificateAuthority, Exchange, Proxy};
+use hiccup_proxy::{
+    CertificateAuthority, Direction, Exchange, InterceptError, InterceptQueue, Pending, Proxy,
+    Verdict,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -26,6 +33,8 @@ pub struct Instance {
     shutdown: CancellationToken,
     proxy: Mutex<Option<RunningProxy>>,
     proxy_running: watch::Sender<bool>,
+    /// Outlives proxy restarts: its settings belong to the instance.
+    intercept: Arc<InterceptQueue>,
 }
 
 struct RunningProxy {
@@ -60,6 +69,7 @@ impl Instance {
             shutdown: CancellationToken::new(),
             proxy: Mutex::new(None),
             proxy_running: watch::channel(false).0,
+            intercept: InterceptQueue::new(),
         })
     }
 
@@ -121,6 +131,7 @@ impl Instance {
         let proxy = Proxy::bind(config)
             .await
             .map_err(|e| failed(e.to_string()))?
+            .with_intercept(self.intercept.clone())
             .with_observer(Arc::new(move |_: &Exchange| {
                 counter.fetch_add(1, Ordering::Relaxed);
             }))
@@ -182,6 +193,53 @@ impl Instance {
             .map_or_else(ProxyStatus::default, RunningProxy::status)
     }
 
+    /// The intercept queue.
+    #[must_use]
+    pub fn intercept(&self) -> &Arc<InterceptQueue> {
+        &self.intercept
+    }
+
+    fn intercept_status(&self) -> InterceptStatus {
+        InterceptStatus {
+            settings: crate::params::intercept_params(&self.intercept.settings()),
+            pending: self.intercept.list().len(),
+        }
+    }
+
+    fn set_intercept(&self, params: &InterceptSettingsParams) -> Result<InterceptStatus, RpcError> {
+        self.intercept
+            .set(crate::params::intercept_settings(params)?);
+        Ok(self.intercept_status())
+    }
+
+    fn pending_item(&self, id: u64) -> Result<PendingItem, RpcError> {
+        let item = self.intercept.get(id).ok_or_else(|| not_found(id))?;
+        Ok(PendingItem {
+            summary: summary(&item),
+            raw: data_encoding::BASE64.encode(&item.raw),
+        })
+    }
+
+    fn forward(&self, params: ForwardParams) -> Result<Value, RpcError> {
+        let verdict = match params.raw {
+            None => Verdict::Forward,
+            Some(raw) => Verdict::ForwardEdited(
+                data_encoding::BASE64
+                    .decode(raw.as_bytes())
+                    .map_err(|e| RpcError::invalid_params(format!("invalid base64 in `raw`: {e}")))?
+                    .into(),
+            ),
+        };
+        self.resolve(params.id, verdict)
+    }
+
+    fn resolve(&self, id: u64, verdict: Verdict) -> Result<Value, RpcError> {
+        self.intercept
+            .resolve(id, verdict)
+            .map_err(|InterceptError::NotFound(id)| not_found(id))?;
+        Ok(serde_json::json!({}))
+    }
+
     /// Stops the proxy if it runs, then cancels [`shutdown_token`](Self::shutdown_token).
     pub async fn shutdown(&self) {
         let _ = self.stop_proxy().await;
@@ -214,12 +272,59 @@ impl Handler for Instance {
                 method::PROXY_START => reply(&self.start_proxy(parse(params)?).await?),
                 method::PROXY_STOP => reply(&self.stop_proxy().await?),
                 method::PROXY_STATUS => reply(&self.proxy_status().await),
+                method::INTERCEPT_STATUS => reply(&self.intercept_status()),
+                method::INTERCEPT_SET => reply(&self.set_intercept(&parse(params)?)?),
+                method::INTERCEPT_LIST => reply(
+                    &self
+                        .intercept
+                        .list()
+                        .iter()
+                        .map(summary)
+                        .collect::<Vec<_>>(),
+                ),
+                method::INTERCEPT_SHOW => {
+                    let ItemParams { id } = parse(params)?;
+                    reply(&self.pending_item(id)?)
+                }
+                method::INTERCEPT_FORWARD => self.forward(parse(params)?),
+                method::INTERCEPT_DROP => {
+                    let ItemParams { id } = parse(params)?;
+                    self.resolve(id, Verdict::Drop)
+                }
+                method::INTERCEPT_FORWARD_ALL => reply(&ForwardAllResult {
+                    forwarded: self.intercept.forward_all(),
+                }),
                 _ => Err(RpcError::new(
                     ErrorCode::MethodNotFound,
                     format!("unknown method {method:?}"),
                 )),
             }
         })
+    }
+}
+
+fn not_found(id: u64) -> RpcError {
+    RpcError::new(
+        ErrorCode::InvalidState,
+        format!("no held item {id} (it may have been resolved or timed out)"),
+    )
+}
+
+fn summary(item: &Pending) -> PendingSummary {
+    PendingSummary {
+        id: item.id,
+        direction: match item.direction {
+            Direction::Request => "request",
+            Direction::Response => "response",
+        }
+        .to_owned(),
+        upstream: item.upstream.clone(),
+        tls: item.tls,
+        method: item.method.clone(),
+        target: item.target.clone(),
+        status: item.status,
+        size: item.raw.len(),
+        age_ms: u64::try_from(item.since.elapsed().as_millis()).unwrap_or(u64::MAX),
     }
 }
 

@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::connection::{self, Context};
+use crate::intercept::InterceptQueue;
 use crate::tls::Interceptor;
 use crate::{CaError, CertificateAuthority, ExchangeObserver, ProxyConfig};
 
@@ -36,6 +37,7 @@ pub struct Proxy {
     config: ProxyConfig,
     observer: Option<ExchangeObserver>,
     interceptor: Option<Interceptor>,
+    intercept: Option<Arc<InterceptQueue>>,
 }
 
 impl Proxy {
@@ -57,6 +59,7 @@ impl Proxy {
             config,
             observer: None,
             interceptor: None,
+            intercept: None,
         })
     }
 
@@ -84,6 +87,13 @@ impl Proxy {
         Ok(self)
     }
 
+    /// Holds matching messages in `queue` until they are resolved.
+    #[must_use]
+    pub fn with_intercept(mut self, queue: Arc<InterceptQueue>) -> Self {
+        self.intercept = Some(queue);
+        self
+    }
+
     /// The addresses actually bound (useful with port `0`).
     #[must_use]
     pub fn local_addrs(&self) -> Vec<SocketAddr> {
@@ -103,6 +113,7 @@ impl Proxy {
             config: self.config,
             observer: self.observer,
             interceptor: self.interceptor,
+            intercept: self.intercept,
             shutdown: shutdown.clone(),
         });
         let (tx, mut rx) = mpsc::channel::<(TcpStream, SocketAddr, SocketAddr)>(64);

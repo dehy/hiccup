@@ -373,7 +373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -446,10 +446,12 @@ name = "hiccup-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "data-encoding",
  "dirs",
  "hiccup-control",
  "hiccup-core",
  "hiccup-proxy",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -479,8 +481,10 @@ dependencies = [
 name = "hiccup-core"
 version = "0.0.0"
 dependencies = [
+ "data-encoding",
  "hiccup-control",
  "hiccup-proxy",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -505,6 +509,7 @@ dependencies = [
  "bytes",
  "hiccup-http",
  "rcgen",
+ "regex",
  "ring",
  "rustls",
  "rustls-platform-verifier",
@@ -896,6 +901,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -954,7 +971,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1010,7 +1027,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1244,7 +1261,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1523,7 +1540,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@
 
 mod ca;
 mod instance;
+mod intercept;
 mod proxy;
 
 use std::io::IsTerminal;
@@ -63,6 +64,9 @@ enum Command {
     /// Intercepting proxy.
     #[command(subcommand)]
     Proxy(proxy::ProxyCommand),
+    /// Hold requests and responses to inspect, edit, forward or drop them.
+    #[command(subcommand)]
+    Intercept(intercept::InterceptCommand),
     /// Running Hiccup instances.
     #[command(subcommand)]
     Instance(instance::InstanceCommand),
@@ -114,6 +118,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Serve => instance::serve(&globals),
         Command::Proxy(command) => proxy::run(command, &globals),
+        Command::Intercept(command) => intercept::run(command, &globals),
         Command::Instance(command) => instance::run(command, &globals),
         Command::Ca(command) => match globals.data_dir() {
             Some(dir) => ca::run(command, &dir, globals.json),

@@ -7,8 +7,89 @@ use std::path::Path;
 use std::time::Duration;
 
 use hiccup_control::RpcError;
-use hiccup_control::api::{HostRule, ProxyStartParams};
-use hiccup_proxy::{ClientCert, HostPattern, ProxyConfig, TlsVersion, UpstreamConfig};
+use hiccup_control::api::{
+    HostRule, InterceptRulesParams, InterceptSettingsParams, ProxyStartParams,
+};
+use hiccup_proxy::{
+    ClientCert, HostPattern, InterceptRules, InterceptSettings, ProxyConfig, TimeoutAction,
+    TlsVersion, UpstreamConfig,
+};
+
+/// Upper bound on a compiled intercept regex (the `regex` crate has linear
+/// matching time, so only memory needs bounding).
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+/// Builds intercept settings from `intercept.set` parameters.
+pub(crate) fn intercept_settings(
+    params: &InterceptSettingsParams,
+) -> Result<InterceptSettings, RpcError> {
+    let invalid = RpcError::invalid_params;
+    let rules = |r: &Option<InterceptRulesParams>| -> Result<Option<InterceptRules>, RpcError> {
+        let Some(r) = r else { return Ok(None) };
+        Ok(Some(InterceptRules {
+            hosts: r
+                .hosts
+                .iter()
+                .map(|h| h.parse().map_err(invalid))
+                .collect::<Result<_, _>>()?,
+            methods: r.methods.iter().map(|m| m.to_ascii_uppercase()).collect(),
+            path: r
+                .path
+                .as_deref()
+                .map(|p| {
+                    regex::RegexBuilder::new(p)
+                        .size_limit(REGEX_SIZE_LIMIT)
+                        .build()
+                        .map_err(|e| invalid(format!("invalid path regex: {e}")))
+                })
+                .transpose()?,
+        }))
+    };
+    let action = match params.on_timeout.as_deref() {
+        None | Some("forward") => TimeoutAction::Forward,
+        Some("drop") => TimeoutAction::Drop,
+        Some(other) => {
+            return Err(invalid(format!(
+                "invalid on_timeout {other:?}: expected \"forward\" or \"drop\""
+            )));
+        }
+    };
+    let timeout = match params.timeout_ms {
+        None => None,
+        Some(0) => return Err(RpcError::invalid_params("`timeout_ms` must be positive")),
+        Some(ms) => Some((Duration::from_millis(ms), action)),
+    };
+    Ok(InterceptSettings {
+        requests: rules(&params.requests)?,
+        responses: rules(&params.responses)?,
+        timeout,
+    })
+}
+
+/// The inverse of [`intercept_settings`], for `intercept.status`.
+pub(crate) fn intercept_params(settings: &InterceptSettings) -> InterceptSettingsParams {
+    let rules = |r: &Option<InterceptRules>| {
+        r.as_ref().map(|r| InterceptRulesParams {
+            hosts: r.hosts.iter().map(ToString::to_string).collect(),
+            methods: r.methods.clone(),
+            path: r.path.as_ref().map(|re| re.as_str().to_owned()),
+        })
+    };
+    InterceptSettingsParams {
+        requests: rules(&settings.requests),
+        responses: rules(&settings.responses),
+        timeout_ms: settings
+            .timeout
+            .map(|(d, _)| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        on_timeout: settings.timeout.map(|(_, a)| {
+            match a {
+                TimeoutAction::Forward => "forward",
+                TimeoutAction::Drop => "drop",
+            }
+            .to_owned()
+        }),
+    }
+}
 
 /// Builds the proxy configuration for `proxy.start`.
 pub(crate) fn proxy_config(params: &ProxyStartParams) -> Result<ProxyConfig, RpcError> {
@@ -116,6 +197,37 @@ fn read_absolute(path: &str) -> Result<Vec<u8>, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intercept_settings_round_trip() {
+        let params = InterceptSettingsParams {
+            requests: Some(InterceptRulesParams {
+                hosts: vec!["*.test".into()],
+                methods: vec!["post".into()],
+                path: Some("^/api/".into()),
+            }),
+            responses: None,
+            timeout_ms: Some(1500),
+            on_timeout: Some("drop".into()),
+        };
+        let settings = intercept_settings(&params).unwrap();
+        let back = intercept_params(&settings);
+        assert_eq!(back.requests.as_ref().unwrap().methods, ["POST"]);
+        assert_eq!(back.timeout_ms, Some(1500));
+        assert_eq!(back.on_timeout.as_deref(), Some("drop"));
+
+        let bad = |f: fn(&mut InterceptSettingsParams)| {
+            let mut p = params.clone();
+            f(&mut p);
+            intercept_settings(&p).unwrap_err().message
+        };
+        assert!(bad(|p| p.requests.as_mut().unwrap().path = Some("(".into())).contains("regex"));
+        assert!(bad(|p| p.on_timeout = Some("later".into())).contains("on_timeout"));
+        assert!(bad(|p| p.timeout_ms = Some(0)).contains("positive"));
+        assert!(
+            bad(|p| p.requests.as_mut().unwrap().hosts = vec!["a b".into()]).contains("pattern")
+        );
+    }
 
     #[test]
     fn defaults_and_errors() {
