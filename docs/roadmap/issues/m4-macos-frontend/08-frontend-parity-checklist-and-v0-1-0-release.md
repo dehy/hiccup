@@ -13,4 +13,4 @@ Define the parity contract that M5 and M6 must meet, then release v0.1.0.
 
 ## Acceptance criteria
 
-- [ ] All checklist items pass on Linux; v0.1.0 published
+- [ ] All checklist items pass on macOS; v0.1.0 published

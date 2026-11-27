@@ -12,4 +12,4 @@ Distribute on Windows.
 
 ## Acceptance criteria
 
-- [ ] Installers pass a SmartScreen/signature check; v0.3.0 released
+- [ ] Installers pass a SmartScreen/signature check; v0.2.0 released

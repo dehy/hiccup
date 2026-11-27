@@ -13,4 +13,4 @@ Distribute the app and CLI on Linux.
 
 ## Acceptance criteria
 
-- [ ] Artifacts install and run on current Debian/Ubuntu, Fedora and Kali
+- [ ] Artifacts install and run on current Debian/Ubuntu, Fedora and Kali; v0.3.0 released

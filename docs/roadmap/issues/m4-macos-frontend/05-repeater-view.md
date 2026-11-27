@@ -1,6 +1,6 @@
 # Repeater view
 
-labels: type:feature, area:ui, platform:linux
+labels: type:feature, area:ui, platform:macos
 
 ## Goal
 

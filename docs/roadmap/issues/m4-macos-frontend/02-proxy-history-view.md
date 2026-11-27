@@ -1,6 +1,6 @@
 # Proxy history view
 
-labels: type:feature, area:ui, platform:linux
+labels: type:feature, area:ui, platform:macos
 
 ## Goal
 
@@ -8,7 +8,7 @@ Browse and filter captured traffic.
 
 ## Tasks
 
-- [ ] Virtualized list (`GtkColumnView`) over paginated core queries
+- [ ] Virtualized table (SwiftUI `Table`) over paginated core queries
 - [ ] Filter bar (host, method, status, MIME, search, scope); live updates from events
 - [ ] Context menu: send to Repeater, copy as raw/curl, add host to scope
 

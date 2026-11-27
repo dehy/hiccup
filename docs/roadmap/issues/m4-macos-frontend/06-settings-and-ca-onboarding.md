@@ -1,6 +1,6 @@
 # Settings and CA onboarding
 
-labels: type:feature, area:ui, platform:linux
+labels: type:feature, area:ui, platform:macos
 
 ## Goal
 
@@ -9,7 +9,7 @@ Configure listeners and help users install the CA.
 ## Tasks
 
 - [ ] Listener config, upstream TLS options, intercept rules, scope editor
-- [ ] CA export plus a step-by-step install guide for Firefox, Chromium and the system store
+- [ ] CA export plus a step-by-step install guide for the system Keychain (Safari, Chrome), Firefox and Chromium
 
 ## Acceptance criteria
 
