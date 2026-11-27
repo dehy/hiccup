@@ -7,7 +7,7 @@
 
 An open source, cross-platform web security testing toolkit written in Rust. Hiccup is an intercepting HTTP(S) proxy with a Repeater and native desktop interfaces for Linux, macOS and Windows.
 
-> **Status:** pre-alpha. The headless proxy works from the CLI, with HTTPS interception, but there is no history, Repeater or GUI yet. Expect breaking changes. See the [roadmap](ROADMAP.md).
+> **Status:** pre-alpha. The headless proxy works from the CLI, with HTTPS interception and an intercept queue, but there is no history, Repeater or GUI yet. Expect breaking changes. See the [roadmap](ROADMAP.md).
 
 Hiccup is an independent project. It is not affiliated with or endorsed by PortSwigger Ltd. "Burp Suite" is a trademark of PortSwigger Ltd.
 
@@ -47,6 +47,17 @@ hiccup instance stop
 ```
 
 A `--foreground` proxy can be controlled the same way while it runs.
+
+Hold requests to inspect, edit, forward or drop them:
+
+```sh
+hiccup intercept on --host '*.example.com' --method POST
+hiccup intercept list                      # held messages and their IDs
+hiccup intercept show 1 --raw > req.http
+hiccup intercept edit 1 --file req.http    # sent exactly as edited; or edit 1 to open $EDITOR
+hiccup intercept drop 2
+hiccup intercept off                       # forwards whatever is still held
+```
 
 To use a browser, [install the Hiccup CA](docs/ca.md) and set `127.0.0.1:8080` as its HTTP and HTTPS proxy. Use `--tls-passthrough` for hosts that should not be decrypted. The proxy only forwards traffic and logs it for now; history, interception and the Repeater are next on the [roadmap](ROADMAP.md).
 

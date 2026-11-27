@@ -153,6 +153,200 @@ Result:
 }
 ```
 
+### `intercept.status`
+
+Describe the intercept settings. They belong to the instance and apply to its proxy whenever it runs.
+
+Parameters:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "pending": 1,
+  "requests": {
+    "hosts": [
+      "*.example.com"
+    ],
+    "methods": [
+      "POST"
+    ],
+    "path": "^/api/"
+  },
+  "responses": null
+}
+```
+
+### `intercept.set`
+
+Replace the intercept settings. Items held in a direction that is turned off are forwarded unchanged.
+
+Parameters:
+
+```json
+{
+  "requests": {
+    "hosts": [
+      "*.example.com"
+    ],
+    "methods": [
+      "POST"
+    ],
+    "path": "^/api/"
+  },
+  "responses": null
+}
+```
+
+Result:
+
+```json
+{
+  "pending": 1,
+  "requests": {
+    "hosts": [
+      "*.example.com"
+    ],
+    "methods": [
+      "POST"
+    ],
+    "path": "^/api/"
+  },
+  "responses": null
+}
+```
+
+Errors:
+
+- `-32602`: a host pattern, regular expression or timeout is invalid
+
+### `intercept.list`
+
+List the held items, oldest first.
+
+Parameters:
+
+```json
+{}
+```
+
+Result:
+
+```json
+[
+  {
+    "age_ms": 1500,
+    "direction": "request",
+    "id": 7,
+    "method": "POST",
+    "size": 412,
+    "target": "/api/login",
+    "tls": true,
+    "upstream": "example.com:443"
+  }
+]
+```
+
+### `intercept.show`
+
+Show one held item with the exact bytes that would be sent.
+
+Parameters:
+
+```json
+{
+  "id": 7
+}
+```
+
+Result:
+
+```json
+{
+  "age_ms": 1500,
+  "direction": "request",
+  "id": 7,
+  "method": "POST",
+  "raw": "UE9TVCAvYXBpL2xvZ2luIEhUVFAvMS4xDQo…",
+  "size": 412,
+  "target": "/api/login",
+  "tls": true,
+  "upstream": "example.com:443"
+}
+```
+
+Errors:
+
+- `-32001`: no held item has this ID (resolved or timed out)
+
+### `intercept.forward`
+
+Forward a held item. With `raw`, those bytes are sent instead, exactly as given; an edited response closes the client connection after it.
+
+Parameters:
+
+```json
+{
+  "id": 7,
+  "raw": "UE9TVCAvYXBpL2xvZ2luIEhUVFAvMS4xDQo…"
+}
+```
+
+Result:
+
+```json
+{}
+```
+
+Errors:
+
+- `-32001`: no held item has this ID (resolved or timed out)
+- `-32602`: `raw` is not valid base64
+
+### `intercept.drop`
+
+Drop a held item. The client gets a 502 response from Hiccup.
+
+Parameters:
+
+```json
+{
+  "id": 7
+}
+```
+
+Result:
+
+```json
+{}
+```
+
+Errors:
+
+- `-32001`: no held item has this ID (resolved or timed out)
+
+### `intercept.forward_all`
+
+Forward every held item unchanged.
+
+Parameters:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "forwarded": 3
+}
+```
+
 ## Notifications
 
 ### `instance.stopping`

@@ -16,6 +16,7 @@ use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::intercept::{Direction, InterceptQueue, Pending, RequestInfo, Verdict};
 use crate::io::{Io, Prefixed};
 use crate::target::{AbsoluteTarget, Authority, TargetError};
 use crate::tls::Interceptor;
@@ -28,6 +29,7 @@ pub(crate) struct Context {
     pub(crate) config: ProxyConfig,
     pub(crate) observer: Option<ExchangeObserver>,
     pub(crate) interceptor: Option<Interceptor>,
+    pub(crate) intercept: Option<Arc<InterceptQueue>>,
     pub(crate) shutdown: CancellationToken,
 }
 
@@ -208,10 +210,12 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     upstream: &mut Option<Upstream>,
     ctx: &Context,
 ) -> io::Result<Next> {
-    let (authority, forwarded, modifications) = match mode {
+    // `path` is the target as forwarded: what intercept rules match.
+    let (authority, forwarded, modifications, path) = match mode {
         Mode::Proxy => match proxy_target(client, &request).await {
             Some((target, forwarded, modification)) => {
-                (target.authority, forwarded, vec![modification])
+                let path = String::from_utf8_lossy(&target.origin_form).into_owned();
+                (target.authority, forwarded, vec![modification], path)
             }
             None => return Ok(Next::Close),
         },
@@ -220,6 +224,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
             authority.clone(),
             Bytes::from(request.to_bytes()),
             Vec::new(),
+            String::from_utf8_lossy(request.head().target()).into_owned(),
         ),
     };
 
@@ -232,6 +237,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         modifications,
         interim: Vec::new(),
         response: None,
+        delivered: None,
         error: None,
     };
     info!(
@@ -241,7 +247,51 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         "request"
     );
 
-    let method = exchange.received.head().method().to_vec();
+    let method_name = String::from_utf8_lossy(exchange.received.head().method()).into_owned();
+    let rule_input = RequestInfo {
+        host: &authority.host,
+        method: &method_name,
+        target: &path,
+    };
+    let pending = |direction, raw: Bytes, status| {
+        let (upstream, tls) = (exchange.upstream.clone(), exchange.tls);
+        let (method, target) = (method_name.clone(), path.clone());
+        move |id| Pending {
+            id,
+            direction,
+            upstream,
+            tls,
+            method,
+            target,
+            status,
+            raw,
+            since: std::time::Instant::now(),
+        }
+    };
+    if let Some(queue) = &ctx.intercept {
+        let held = pending(Direction::Request, exchange.forwarded.clone(), None);
+        match queue.hold(Direction::Request, &rule_input, held).await {
+            Verdict::Forward => {}
+            Verdict::ForwardEdited(bytes) => {
+                exchange.forwarded = bytes;
+                exchange.modifications.push(Modification::RequestEdited);
+            }
+            Verdict::Drop => {
+                let detail = "the request was dropped in Hiccup's intercept queue".to_owned();
+                return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
+            }
+        }
+    }
+
+    // An edited request may use another method, which changes how the
+    // response is framed (e.g. HEAD).
+    let method = Request::parse(&exchange.forwarded, &ctx.config.limits, true)
+        .ok()
+        .flatten()
+        .map_or_else(
+            || exchange.received.head().method().to_vec(),
+            |r| r.head().method().to_vec(),
+        );
     let retry_allowed = is_idempotent(&method);
     let mut attempt = 0;
     let response = loop {
@@ -271,12 +321,13 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
                 else {
                     return Ok(None);
                 };
-                client.write_all(response.head().as_bytes()).await?;
-                client.write_all(response.body()).await?;
                 match response.head().status_code() {
                     Some(100..=199) if response.framing().framing != Framing::Tunnel => {
+                        client.write_all(response.head().as_bytes()).await?;
+                        client.write_all(response.body()).await?;
                         exchange.interim.push(response);
                     }
+                    // The final response is written below, after interception.
                     _ => return Ok(Some(response)),
                 }
             }
@@ -314,9 +365,55 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let framing = response.framing().framing;
-    let keep_client = keep_alive(exchange.received.head()) && keep_alive(response.head());
-    let keep_upstream = keep_client && framing != Framing::UntilClose;
+    let mut keep_client = keep_alive(exchange.received.head()) && keep_alive(response.head());
+    // Edited bytes may hold more than one request, or frame it differently:
+    // the connection may then carry responses that belong to none of ours.
+    let request_edited = exchange
+        .modifications
+        .contains(&Modification::RequestEdited);
+    let keep_upstream = keep_client && framing != Framing::UntilClose && !request_edited;
+
+    let verdict = match &ctx.intercept {
+        // A protocol switch is relayed as is.
+        Some(queue) if framing != Framing::Tunnel => {
+            let raw = Bytes::from(response.to_bytes());
+            let held = pending(Direction::Response, raw, response.head().status_code());
+            queue.hold(Direction::Response, &rule_input, held).await
+        }
+        _ => Verdict::Forward,
+    };
+    let written = match verdict {
+        Verdict::Forward => {
+            async {
+                client.write_all(response.head().as_bytes()).await?;
+                client.write_all(response.body()).await
+            }
+            .await
+        }
+        Verdict::ForwardEdited(bytes) => {
+            // The edited bytes may frame the message differently: close the
+            // client connection after them rather than guess.
+            keep_client = false;
+            exchange.modifications.push(Modification::ResponseEdited);
+            let written = client.write_all(&bytes).await;
+            exchange.delivered = Some(bytes);
+            written
+        }
+        Verdict::Drop => {
+            exchange.response = Some(response);
+            if !keep_upstream {
+                *upstream = None;
+            }
+            let detail = "the response was dropped in Hiccup's intercept queue".to_owned();
+            return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
+        }
+    };
     exchange.response = Some(response);
+    if let Err(e) = written {
+        exchange.error = Some(format!("cannot send the response to the client: {e}"));
+        notify(ctx, &exchange);
+        return Err(e);
+    }
     notify(ctx, &exchange);
 
     if framing == Framing::Tunnel {
