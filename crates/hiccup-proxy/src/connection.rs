@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use hiccup_http::{Error as HttpError, Framing, Head, Limits, Request, Response};
+use hiccup_http::{
+    BodyDecoder, Error as HttpError, Framing, Head, Limits, Request, Response, ResponseHead,
+};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -103,6 +105,8 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 // ---------------------------------------------------------------------------
 // Reading
 
+// shortcut: request bodies are read whole before forwarding (a large upload
+// is held in memory); stream them like responses, see #55.
 /// Reads the next complete request. Returns `None` when the connection should
 /// close without a response (EOF, idle timeout, shutdown, or an error that was
 /// already answered).
@@ -186,6 +190,112 @@ async fn read_response(
     }
 }
 
+/// Reads until the upstream buffer starts with a complete response head,
+/// and parses it; the bytes stay in the buffer. Returns `Ok(None)` if the
+/// connection closed before any byte of a response arrived.
+async fn read_head(
+    upstream: &mut Upstream,
+    limits: &Limits,
+    timeout: Duration,
+) -> io::Result<Option<ResponseHead>> {
+    loop {
+        match ResponseHead::parse(&upstream.buf, limits) {
+            Ok(Some(head)) => return Ok(Some(head)),
+            Ok(None) => {}
+            Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+        }
+        if read_with_timeout(&mut upstream.stream, &mut upstream.buf, timeout).await? == 0 {
+            return if upstream.buf.is_empty() {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the connection closed in a response head",
+                ))
+            };
+        }
+    }
+}
+
+/// Why relaying a body stopped early.
+enum Failure {
+    /// The upstream failed: this is a message for the exchange.
+    Upstream(String),
+    /// The client could not be written to.
+    Client(io::Error),
+}
+
+/// A relayed body: what was kept of it, and how it ended.
+struct Streamed {
+    kept: Bytes,
+    truncated: bool,
+    anomalies: Vec<hiccup_http::Anomaly>,
+    result: Result<(), Failure>,
+}
+
+/// Writes `head` to the client, then relays the body as it arrives from
+/// `upstream` (whose buffer starts right after the head), keeping up to
+/// `max_kept_body` bytes of it. Bytes after the body stay in the buffer.
+async fn stream_body<S: AsyncWrite + Unpin>(
+    client: &mut S,
+    upstream: &mut Upstream,
+    head: &ResponseHead,
+    framing: Framing,
+    authority: &str,
+    ctx: &Context,
+) -> Streamed {
+    let cap = ctx.config.max_kept_body;
+    let mut decoder = BodyDecoder::new(framing, ctx.config.limits);
+    let mut kept = BytesMut::new();
+    let mut truncated = false;
+    let result = async {
+        client
+            .write_all(head.as_bytes())
+            .await
+            .map_err(Failure::Client)?;
+        loop {
+            let used = decoder.feed(&upstream.buf).map_err(|e| {
+                Failure::Upstream(format!("invalid response body from {authority}: {e}"))
+            })?;
+            let body = upstream.buf.split_to(used);
+            client.write_all(&body).await.map_err(Failure::Client)?;
+            let room = cap.saturating_sub(kept.len());
+            kept.extend_from_slice(&body[..room.min(body.len())]);
+            truncated |= body.len() > room;
+            if decoder.is_complete() {
+                return Ok(());
+            }
+            let read = read_with_timeout(
+                &mut upstream.stream,
+                &mut upstream.buf,
+                ctx.config.read_timeout,
+            );
+            match read.await {
+                Ok(0) => {
+                    return decoder.finish().map_err(|e| {
+                        Failure::Upstream(format!(
+                            "{authority} closed the connection mid-body: {e}"
+                        ))
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(Failure::Upstream(format!(
+                        "error talking to {authority}: {e}"
+                    )));
+                }
+            }
+        }
+    }
+    .await;
+    Streamed {
+        kept: kept.freeze(),
+        truncated,
+        anomalies: decoder.anomalies().to_vec(),
+        result,
+    }
+}
+
 async fn read_with_timeout<S: AsyncRead + Unpin>(
     stream: &mut S,
     buf: &mut BytesMut,
@@ -239,6 +349,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         modifications,
         interim: Vec::new(),
         response: None,
+        response_truncated: false,
         delivered: None,
         error: None,
     };
@@ -295,7 +406,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
             || exchange.received.head().method().to_vec(),
             |r| r.head().method().to_vec(),
         );
-    let response = match round_trip(
+    let head = match round_trip(
         client,
         &mut exchange,
         &method,
@@ -306,20 +417,80 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     )
     .await
     {
-        Ok(response) => response,
+        Ok(head) => head,
         Err(detail) => return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await,
     };
 
-    let framing = response.framing().framing;
+    let decision = head.framing(&method);
+    let framing = decision.framing;
     let received = exchange.received.head();
     let mut keep_client = keep_alive(received, received.version().unwrap_or_default())
-        && keep_alive(response.head(), response.head().version());
+        && keep_alive(&head, head.version());
     // Edited bytes may hold more than one request, or frame it differently:
     // the connection may then carry responses that belong to none of ours.
     let request_edited = exchange
         .modifications
         .contains(&Modification::RequestEdited);
     let keep_upstream = keep_client && framing != Framing::UntilClose && !request_edited;
+
+    // A body is relayed as it arrives, unless the response is to be held:
+    // editing needs all of it. A protocol switch is relayed as is.
+    let held = framing != Framing::Tunnel
+        && ctx
+            .intercept
+            .as_ref()
+            .is_some_and(|q| q.matches(Direction::Response, &rule_input));
+    if !held
+        && matches!(
+            framing,
+            Framing::Length(_) | Framing::Chunked | Framing::UntilClose
+        )
+    {
+        let up = upstream.as_mut().expect("upstream is connected");
+        let _ = up.buf.split_to(head.len());
+        let streamed = stream_body(client, up, &head, framing, &exchange.upstream, ctx).await;
+        exchange.response = Some(Response::from_parts(
+            head,
+            decision,
+            streamed.kept,
+            streamed.anomalies,
+        ));
+        exchange.response_truncated = streamed.truncated;
+        if streamed.result.is_err() || !keep_upstream {
+            *upstream = None;
+        }
+        let ok = match streamed.result {
+            Ok(()) => true,
+            Err(Failure::Upstream(detail)) => {
+                // The head is already sent: the client sees a cut response.
+                exchange.error = Some(detail);
+                false
+            }
+            Err(Failure::Client(e)) => {
+                exchange.error = Some(format!("cannot send the response to the client: {e}"));
+                notify(ctx, &mut exchange);
+                return Err(e);
+            }
+        };
+        notify(ctx, &mut exchange);
+        return Ok(if ok && keep_client && framing != Framing::UntilClose {
+            Next::Continue
+        } else {
+            Next::Close
+        });
+    }
+
+    let up = upstream.as_mut().expect("upstream is connected");
+    let limits = &ctx.config.limits;
+    let response = match read_response(up, &method, limits, ctx.config.read_timeout).await {
+        Ok(Some(response)) => response,
+        Ok(None) => unreachable!("the head is already buffered"),
+        Err(e) => {
+            *upstream = None;
+            let detail = format!("error talking to {authority}: {e}");
+            return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
+        }
+    };
 
     let verdict = match &ctx.intercept {
         // A protocol switch is relayed as is.
@@ -383,9 +554,10 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Sends the request upstream, on the open connection to `authority` if
-/// there is one, and reads the final response. Interim (1xx) responses are
-/// relayed to the client as they come. Retries once on a new connection if
-/// a reused one turns out to be closed. Errors are the 502's detail.
+/// there is one, and reads the final response's head, which stays in the
+/// upstream buffer. Interim (1xx) responses are relayed to the client as
+/// they come. Retries once on a new connection if a reused one turns out to
+/// be closed. Errors are the 502's detail.
 async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut S,
     exchange: &mut Exchange,
@@ -394,7 +566,7 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     mode: &Mode,
     upstream: &mut Option<Upstream>,
     ctx: &Context,
-) -> Result<Response, String> {
+) -> Result<ResponseHead, String> {
     let retry_allowed = is_idempotent(method);
     let mut attempt = 0;
     loop {
@@ -414,29 +586,31 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let up = upstream.as_mut().expect("upstream is connected");
 
-        let result: io::Result<Option<Response>> = async {
+        let (limits, timeout) = (&ctx.config.limits, ctx.config.read_timeout);
+        let result: io::Result<Option<ResponseHead>> = async {
             up.stream.write_all(&exchange.forwarded).await?;
             loop {
-                let Some(response) =
-                    read_response(up, method, &ctx.config.limits, ctx.config.read_timeout).await?
-                else {
+                let Some(head) = read_head(up, limits, timeout).await? else {
                     return Ok(None);
                 };
-                match response.head().status_code() {
-                    Some(100..=199) if response.framing().framing != Framing::Tunnel => {
-                        client.write_all(response.head().as_bytes()).await?;
-                        client.write_all(response.body()).await?;
-                        exchange.interim.push(response);
+                match head.status_code() {
+                    Some(100..=199) if head.framing(method).framing != Framing::Tunnel => {
+                        // No body: complete as soon as the head is.
+                        let interim = read_response(up, method, limits, timeout)
+                            .await?
+                            .expect("the head is already buffered");
+                        client.write_all(interim.head().as_bytes()).await?;
+                        exchange.interim.push(interim);
                     }
-                    // The final response is written below, after interception.
-                    _ => return Ok(Some(response)),
+                    // The final response is relayed by the caller.
+                    _ => return Ok(Some(head)),
                 }
             }
         }
         .await;
 
         match result {
-            Ok(Some(response)) => return Ok(response),
+            Ok(Some(head)) => return Ok(head),
             // A reused connection closed while idle: retry once on a new one.
             Ok(None) if reused && retry_allowed && attempt == 1 && exchange.interim.is_empty() => {
                 debug!("reused upstream connection was closed; retrying");

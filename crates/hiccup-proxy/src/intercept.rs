@@ -66,6 +66,16 @@ pub struct InterceptSettings {
     pub timeout: Option<(Duration, TimeoutAction)>,
 }
 
+impl InterceptSettings {
+    fn matches(&self, direction: Direction, request: &RequestInfo<'_>) -> bool {
+        let rules = match direction {
+            Direction::Request => self.requests.as_ref(),
+            Direction::Response => self.responses.as_ref(),
+        };
+        rules.is_some_and(|r| r.matches(request))
+    }
+}
+
 /// What the user decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -230,6 +240,15 @@ impl InterceptQueue {
         count
     }
 
+    /// Whether [`hold`](Self::hold) would hold such a message now: it is
+    /// then read in full rather than streamed.
+    pub(crate) fn matches(&self, direction: Direction, request: &RequestInfo<'_>) -> bool {
+        self.settings
+            .read()
+            .expect("not poisoned")
+            .matches(direction, request)
+    }
+
     /// Holds the message if the rules for `direction` match `request`, and
     /// waits for the verdict. Returns `Forward` at once otherwise.
     pub(crate) async fn hold(
@@ -243,11 +262,7 @@ impl InterceptQueue {
             // Listed while the settings are read-locked, so that `set` cannot
             // turn this direction off and release in between.
             let settings = self.settings.read().expect("not poisoned");
-            let rules = match direction {
-                Direction::Request => settings.requests.as_ref(),
-                Direction::Response => settings.responses.as_ref(),
-            };
-            if !rules.is_some_and(|r| r.matches(request)) {
+            if !settings.matches(direction, request) {
                 return Verdict::Forward;
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;

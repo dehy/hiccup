@@ -28,6 +28,24 @@ pub type Request = Message<RequestHead>;
 pub type Response = Message<ResponseHead>;
 
 impl<H: std::ops::Deref<Target = crate::Head>> Message<H> {
+    /// A message from its parts, for a caller that streamed the body and
+    /// kept only `body`, which may be the start of it.
+    /// [`to_bytes`](Self::to_bytes) then returns the head and that part.
+    #[must_use]
+    pub fn from_parts(
+        head: H,
+        framing: FramingDecision,
+        body: Bytes,
+        body_anomalies: Vec<Anomaly>,
+    ) -> Self {
+        Self {
+            head,
+            body,
+            framing,
+            body_anomalies,
+        }
+    }
+
     /// The head.
     pub fn head(&self) -> &H {
         &self.head

@@ -95,12 +95,17 @@ struct Running {
 }
 
 async fn start_proxy() -> Running {
-    let config = ProxyConfig {
+    start_proxy_with(|_| {}).await
+}
+
+async fn start_proxy_with(configure: impl FnOnce(&mut ProxyConfig)) -> Running {
+    let mut config = ProxyConfig {
         listen: vec!["127.0.0.1:0".parse().unwrap()],
         connect_timeout: Duration::from_secs(2),
         shutdown_grace: Duration::from_millis(500),
         ..ProxyConfig::default()
     };
+    configure(&mut config);
     let exchanges = Arc::new(Mutex::new(Vec::new()));
     let sink = exchanges.clone();
     let proxy = Proxy::bind(config)
@@ -526,4 +531,117 @@ async fn curl_through_the_proxy() {
             .iter()
             .all(|r| r.starts_with(b"GET /curl HTTP/1.1\r\n"))
     );
+}
+
+/// An origin that answers one connection with `parts`, waiting for a signal
+/// before each part after the first; it closes the connection at the end.
+async fn scripted_origin(parts: Vec<&'static [u8]>) -> (SocketAddr, tokio::sync::mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (next, mut go) = tokio::sync::mpsc::channel::<()>(8);
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        while Request::parse(&buf, &Limits::DEFAULT, false)
+            .unwrap()
+            .is_none()
+        {
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).await.unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        for (i, part) in parts.into_iter().enumerate() {
+            if i > 0 && go.recv().await.is_none() {
+                return;
+            }
+            stream.write_all(part).await.unwrap();
+        }
+    });
+    (addr, next)
+}
+
+/// Reads from `stream` until `buf` ends with `suffix`.
+async fn read_until(stream: &mut TcpStream, buf: &mut Vec<u8>, suffix: &[u8]) {
+    while !buf.ends_with(suffix) {
+        let mut chunk = [0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .expect("timed out: the bytes were not relayed")
+            .unwrap();
+        assert!(n > 0, "closed early: {}", String::from_utf8_lossy(buf));
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+#[tokio::test]
+async fn a_body_is_relayed_as_it_arrives() {
+    // A stream that has not ended (like server-sent events).
+    let (origin, next) = scripted_origin(vec![
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n",
+        b"4\r\nlast\r\n0\r\n\r\n",
+    ])
+    .await;
+    let proxy = start_proxy().await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(format!("GET http://{origin}/events HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    read_until(&mut client, &mut buf, b"first\r\n").await;
+    assert!(
+        proxy.exchanges.lock().unwrap().is_empty(),
+        "not complete yet"
+    );
+
+    next.send(()).await.unwrap();
+    read_until(&mut client, &mut buf, b"0\r\n\r\n").await;
+    let exchanges = proxy.exchanges.lock().unwrap();
+    let response = exchanges[0].response.as_ref().unwrap();
+    assert_eq!(
+        response.to_bytes(),
+        buf,
+        "kept whole: it is under the limit"
+    );
+    assert!(!exchanges[0].response_truncated && exchanges[0].error.is_none());
+}
+
+#[tokio::test]
+async fn a_big_body_is_relayed_whole_and_kept_up_to_the_limit() {
+    let origin = Origin::start(Origin::ok("0123456789abcdefghij")).await;
+    let proxy = start_proxy_with(|c| c.max_kept_body = 8).await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(format!("GET http://{}/ HTTP/1.1\r\n\r\n", origin.addr).as_bytes())
+        .await
+        .unwrap();
+    let response = read_response(&mut client, &mut Vec::new(), b"GET").await;
+    assert_eq!(&response.body()[..], b"0123456789abcdefghij");
+
+    let exchanges = proxy.exchanges.lock().unwrap();
+    assert_eq!(
+        &exchanges[0].response.as_ref().unwrap().body()[..],
+        b"01234567"
+    );
+    assert!(exchanges[0].response_truncated);
+}
+
+#[tokio::test]
+async fn an_upstream_dying_mid_body_closes_the_client() {
+    // Ten bytes announced, four sent, then the origin closes.
+    let (origin, _next) =
+        scripted_origin(vec![b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhalf"]).await;
+    let proxy = start_proxy().await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(format!("GET http://{origin}/ HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    read_until(&mut client, &mut buf, b"half").await;
+    assert!(closes(&mut client).await, "the client must see the cut");
+    let exchanges = proxy.exchanges.lock().unwrap();
+    let error = exchanges[0].error.as_deref().unwrap();
+    assert!(error.contains("mid-body"), "{error}");
+    assert_eq!(&exchanges[0].response.as_ref().unwrap().body()[..], b"half");
 }
