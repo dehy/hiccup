@@ -7,8 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hiccup_http::{Limits, Response};
-use hiccup_proxy::{CertificateAuthority, Exchange, Proxy, ProxyConfig};
+use hiccup_proxy::{
+    CertificateAuthority, ClientCert, Exchange, Proxy, ProxyConfig, TlsVersion, UpstreamConfig,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -23,7 +26,8 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 }
 
 /// A TLS origin server with a self-signed certificate. Every response body is
-/// `<SNI or "-">|<request line>`.
+/// `<SNI or "-">|<request line>`; the `X-Tls` header gives the TLS version and
+/// `X-Client-Cert` whether the client presented a certificate.
 struct TlsOrigin {
     addr: SocketAddr,
     cert: CertificateDer<'static>,
@@ -32,17 +36,34 @@ struct TlsOrigin {
 
 impl TlsOrigin {
     async fn start() -> Self {
+        Self::start_with(None).await
+    }
+
+    /// With `client_ca`, asks for a client certificate signed by it
+    /// (optional).
+    async fn start_with(client_ca: Option<CertificateDer<'static>>) -> Self {
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
                 .unwrap();
         let cert = cert.der().clone();
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
-        let mut config = ServerConfig::builder_with_provider(provider())
+        let builder = ServerConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key)
             .unwrap();
+        let builder = match client_ca {
+            Some(ca) => {
+                let mut roots = RootCertStore::empty();
+                roots.add(ca).unwrap();
+                let verifier =
+                    WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider())
+                        .allow_unauthenticated()
+                        .build()
+                        .unwrap();
+                builder.with_client_cert_verifier(verifier)
+            }
+            None => builder.with_no_client_auth(),
+        };
+        let mut config = builder.with_single_cert(vec![cert.clone()], key).unwrap();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let acceptor = TlsAcceptor::from(Arc::new(config));
 
@@ -58,16 +79,32 @@ impl TlsOrigin {
                     let Ok(mut tls) = acceptor.accept(tcp).await else {
                         return;
                     };
-                    let sni = tls.get_ref().1.server_name().unwrap_or("-").to_owned();
+                    let conn = tls.get_ref().1;
+                    let sni = conn.server_name().unwrap_or("-").to_owned();
+                    let version = match conn.protocol_version() {
+                        Some(rustls::ProtocolVersion::TLSv1_2) => "1.2",
+                        Some(rustls::ProtocolVersion::TLSv1_3) => "1.3",
+                        _ => "?",
+                    };
+                    let client_cert = if conn.peer_certificates().is_some() {
+                        "yes"
+                    } else {
+                        "no"
+                    };
                     let mut buf = Vec::new();
                     loop {
                         while let Some(end) = find(&buf, b"\r\n\r\n") {
                             let head: Vec<u8> = buf.drain(..end + 4).collect();
                             let line = String::from_utf8_lossy(&head);
                             let line = line.lines().next().unwrap_or_default();
+                            if line.contains("/hang") {
+                                std::future::pending::<()>().await;
+                            }
                             let body = format!("{sni}|{line}");
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                                "HTTP/1.1 200 OK\r\nX-Tls: {version}\r\n\
+                                 X-Client-Cert: {client_cert}\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
                                 body.len()
                             );
                             if tls.write_all(response.as_bytes()).await.is_err() {
@@ -370,4 +407,191 @@ async fn curl_trusts_the_intercepted_certificate() {
     );
     assert_eq!(out.stdout, b"localhost|GET /curl HTTP/1.1");
     assert_eq!(h.exchanges().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Upstream options (#11)
+
+fn header(r: &Response, name: &str) -> String {
+    let h = r
+        .head()
+        .get(name)
+        .unwrap_or_else(|| panic!("no {name} header"));
+    String::from_utf8_lossy(h.value()).into_owned()
+}
+
+/// Opens an intercepted tunnel to `target` and sends one GET for `path`.
+async fn get(h: &Harness, target: &str, server_name: &str, path: &str) -> Response {
+    let tunnel = h.connect(target).await;
+    let ca_cert = CertificateDer::from(h.ca.cert_der().to_vec());
+    let mut tls = tls_client(tunnel, &ca_cert, server_name).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {server_name}\r\n\r\n");
+    exchange(&mut tls, request.as_bytes()).await
+}
+
+fn with_upstream(upstream: UpstreamConfig) -> ProxyConfig {
+    ProxyConfig {
+        upstream,
+        ..ProxyConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn verification_rejects_an_untrusted_upstream() {
+    let origin = TlsOrigin::start().await;
+    let target = format!("localhost:{}", origin.addr.port());
+
+    let h = Harness::start(with_upstream(UpstreamConfig {
+        verify: true,
+        ..UpstreamConfig::default()
+    }))
+    .await;
+    let r = get(&h, &target, "localhost", "/").await;
+    assert_eq!(r.head().status_code(), Some(502));
+    assert!(
+        body(&r).contains("invalid peer certificate"),
+        "{}",
+        body(&r)
+    );
+
+    // Off by default: the self-signed origin is accepted.
+    let h = Harness::start(ProxyConfig::default()).await;
+    let r = get(&h, &target, "localhost", "/").await;
+    assert_eq!(r.head().status_code(), Some(200));
+}
+
+#[tokio::test]
+async fn sni_can_be_overridden_per_host() {
+    let origin = TlsOrigin::start().await;
+    let h = Harness::start(with_upstream(UpstreamConfig {
+        sni: vec![("*.test".parse().unwrap(), "override.example".into())],
+        resolve: vec![("app.test".parse().unwrap(), "127.0.0.1".parse().unwrap())],
+        ..UpstreamConfig::default()
+    }))
+    .await;
+    let target = format!("app.test:{}", origin.addr.port());
+    let r = get(&h, &target, "app.test", "/").await;
+    assert_eq!(body(&r), "override.example|GET / HTTP/1.1");
+}
+
+#[tokio::test]
+async fn resolve_overrides_dns() {
+    let origin = TlsOrigin::start().await;
+    let h = Harness::start(with_upstream(UpstreamConfig {
+        resolve: vec![(
+            "Target.Invalid".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        )],
+        ..UpstreamConfig::default()
+    }))
+    .await;
+    // `.invalid` never resolves (RFC 6761): only the override can reach it.
+    let target = format!("target.invalid:{}", origin.addr.port());
+    let r = get(&h, &target, "target.invalid", "/").await;
+    assert_eq!(body(&r), "target.invalid|GET / HTTP/1.1");
+}
+
+#[tokio::test]
+async fn tls_versions_can_be_limited() {
+    let origin = TlsOrigin::start().await;
+    let target = format!("localhost:{}", origin.addr.port());
+
+    let h = Harness::start(ProxyConfig::default()).await;
+    assert_eq!(
+        header(&get(&h, &target, "localhost", "/").await, "x-tls"),
+        "1.3"
+    );
+
+    let h = Harness::start(with_upstream(UpstreamConfig {
+        tls_max: TlsVersion::Tls12,
+        ..UpstreamConfig::default()
+    }))
+    .await;
+    assert_eq!(
+        header(&get(&h, &target, "localhost", "/").await, "x-tls"),
+        "1.2"
+    );
+
+    // An empty range is refused up front.
+    let err = Proxy::bind(ProxyConfig {
+        listen: vec!["127.0.0.1:0".parse().unwrap()],
+        upstream: UpstreamConfig {
+            tls_min: TlsVersion::Tls13,
+            tls_max: TlsVersion::Tls12,
+            ..UpstreamConfig::default()
+        },
+        ..ProxyConfig::default()
+    })
+    .await
+    .unwrap()
+    .intercept_tls(Arc::new(CertificateAuthority::generate().unwrap()))
+    .err()
+    .unwrap();
+    assert!(err.to_string().contains("no TLS version"), "{err}");
+}
+
+#[tokio::test]
+async fn client_certificates_are_presented_per_host() {
+    // A client CA, and a client certificate it signed.
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let issuer = rcgen::Issuer::new(ca_params, ca_key);
+    let client_key = rcgen::KeyPair::generate().unwrap();
+    let client_cert = rcgen::CertificateParams::new(vec!["client".to_owned()])
+        .unwrap()
+        .signed_by(&client_key, &issuer)
+        .unwrap();
+    let client = ClientCert::from_pem(
+        client_cert.pem().as_bytes(),
+        client_key.serialize_pem().as_bytes(),
+    )
+    .unwrap();
+
+    let origin = TlsOrigin::start_with(Some(ca_cert.der().clone())).await;
+    let target = format!("localhost:{}", origin.addr.port());
+
+    let h = Harness::start(with_upstream(UpstreamConfig {
+        client_certs: vec![("localhost".parse().unwrap(), client)],
+        ..UpstreamConfig::default()
+    }))
+    .await;
+    let r = get(&h, &target, "localhost", "/").await;
+    assert_eq!(header(&r, "x-client-cert"), "yes");
+
+    let h = Harness::start(ProxyConfig::default()).await;
+    let r = get(&h, &target, "localhost", "/").await;
+    assert_eq!(header(&r, "x-client-cert"), "no");
+}
+
+#[tokio::test]
+async fn upstream_timeouts_answer_502() {
+    let origin = TlsOrigin::start().await;
+    // Accepts TCP but never speaks TLS.
+    let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_port = silent.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = silent.accept().await {
+            held.push(s);
+        }
+    });
+    let h = Harness::start(ProxyConfig {
+        connect_timeout: std::time::Duration::from_millis(300),
+        read_timeout: std::time::Duration::from_millis(300),
+        ..ProxyConfig::default()
+    })
+    .await;
+
+    let started = std::time::Instant::now();
+    let r = get(&h, &format!("localhost:{silent_port}"), "localhost", "/").await;
+    assert_eq!(r.head().status_code(), Some(502));
+    assert!(body(&r).contains("timed out"), "{}", body(&r));
+
+    let target = format!("localhost:{}", origin.addr.port());
+    let r = get(&h, &target, "localhost", "/hang").await;
+    assert_eq!(r.head().status_code(), Some(502));
+    assert!(body(&r).contains("timed out"), "{}", body(&r));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

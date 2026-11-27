@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use hiccup_http::Limits;
 
-use crate::HostPattern;
+use crate::{HostPattern, UpstreamConfig};
 
 /// Configuration of a [`crate::Proxy`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +30,8 @@ pub struct ProxyConfig {
     /// for example clients that pin certificates. Only relevant when a CA is
     /// set with [`crate::Proxy::intercept_tls`].
     pub tls_passthrough: Vec<HostPattern>,
+    /// How to connect to upstream servers.
+    pub upstream: UpstreamConfig,
 }
 
 impl ProxyConfig {
@@ -48,6 +50,7 @@ impl Default for ProxyConfig {
             read_timeout: Duration::from_secs(60),
             shutdown_grace: Duration::from_secs(5),
             tls_passthrough: Vec::new(),
+            upstream: UpstreamConfig::default(),
         }
     }
 }
