@@ -113,6 +113,48 @@ pub struct Pending {
     pub since: Instant,
 }
 
+/// How a held message left the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Forwarded unchanged (by the user, `forward_all`, turning a direction
+    /// off, or a timeout).
+    Forwarded,
+    /// Forwarded with the user's edits.
+    Edited,
+    /// Dropped (by the user or a timeout).
+    Dropped,
+    /// The connection closed while it was held.
+    Abandoned,
+}
+
+impl From<&Verdict> for Outcome {
+    fn from(verdict: &Verdict) -> Self {
+        match verdict {
+            Verdict::Forward => Self::Forwarded,
+            Verdict::ForwardEdited(_) => Self::Edited,
+            Verdict::Drop => Self::Dropped,
+        }
+    }
+}
+
+/// A change in the queue, for live views.
+#[derive(Clone, Copy, Debug)]
+pub enum QueueEvent<'a> {
+    /// A message is now held.
+    Held(&'a Pending),
+    /// A held message left the queue.
+    Resolved {
+        /// Its ID.
+        id: u64,
+        /// How.
+        outcome: Outcome,
+    },
+}
+
+/// Told of every [`QueueEvent`]. It runs on the caller's task, possibly with
+/// the queue locked: keep it fast, and never call back into the queue.
+pub type QueueListener = Arc<dyn Fn(QueueEvent<'_>) + Send + Sync>;
+
 /// Why a queue operation failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InterceptError {
@@ -141,6 +183,7 @@ pub struct InterceptQueue {
     scope: RwLock<Scope>,
     pending: Mutex<BTreeMap<u64, Entry>>,
     next_id: AtomicU64,
+    listener: Option<QueueListener>,
 }
 
 impl InterceptQueue {
@@ -148,6 +191,22 @@ impl InterceptQueue {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// An empty queue with interception off, whose changes `listener` is
+    /// told of.
+    #[must_use]
+    pub fn with_listener(listener: QueueListener) -> Arc<Self> {
+        Arc::new(Self {
+            listener: Some(listener),
+            ..Self::default()
+        })
+    }
+
+    fn emit(&self, event: QueueEvent<'_>) {
+        if let Some(listener) = &self.listener {
+            listener(event);
+        }
     }
 
     /// The current settings.
@@ -217,8 +276,10 @@ impl InterceptQueue {
             .expect("not poisoned")
             .remove(&id)
             .ok_or(InterceptError::NotFound(id))?;
+        let outcome = Outcome::from(&verdict);
         // The connection may have closed meanwhile: nothing to do then.
         let _ = entry.verdict.send(verdict);
+        self.emit(QueueEvent::Resolved { id, outcome });
         Ok(())
     }
 
@@ -240,6 +301,10 @@ impl InterceptQueue {
         let count = released.len();
         for entry in released {
             let _ = entry.verdict.send(Verdict::Forward);
+            self.emit(QueueEvent::Resolved {
+                id: entry.item.id,
+                outcome: Outcome::Forwarded,
+            });
         }
         count
     }
@@ -293,10 +358,10 @@ impl InterceptQueue {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
             let item = item(id);
             info!(id, ?direction, method = %item.method, target = %item.target, "intercepted");
-            self.pending
-                .lock()
-                .expect("not poisoned")
-                .insert(id, Entry { item, verdict: tx });
+            let mut pending = self.pending.lock().expect("not poisoned");
+            // Told while the item is locked in: it cannot be resolved first.
+            self.emit(QueueEvent::Held(&item));
+            pending.insert(id, Entry { item, verdict: tx });
             (id, settings.timeout)
         };
         // If the connection goes away while waiting, unlist the item.
@@ -308,10 +373,22 @@ impl InterceptQueue {
                 Ok(verdict) => verdict.unwrap_or(Verdict::Forward),
                 Err(_) => {
                     debug!(id, ?action, "intercept timeout");
-                    match action {
+                    let verdict = match action {
                         TimeoutAction::Forward => Verdict::Forward,
                         TimeoutAction::Drop => Verdict::Drop,
+                    };
+                    // Unless the user resolved it just now.
+                    if self
+                        .pending
+                        .lock()
+                        .expect("not poisoned")
+                        .remove(&id)
+                        .is_some()
+                    {
+                        let outcome = Outcome::from(&verdict);
+                        self.emit(QueueEvent::Resolved { id, outcome });
                     }
+                    verdict
                 }
             },
         };
@@ -327,8 +404,17 @@ struct Unlist<'a> {
 
 impl Drop for Unlist<'_> {
     fn drop(&mut self) {
-        if let Ok(mut pending) = self.queue.pending.lock() {
-            pending.remove(&self.id);
+        // Still listed only if nobody resolved it: the connection went away.
+        let removed = self
+            .queue
+            .pending
+            .lock()
+            .is_ok_and(|mut pending| pending.remove(&self.id).is_some());
+        if removed {
+            self.queue.emit(QueueEvent::Resolved {
+                id: self.id,
+                outcome: Outcome::Abandoned,
+            });
         }
     }
 }
@@ -464,6 +550,73 @@ mod tests {
             }
             assert!(queue.list().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn every_change_is_told_once() {
+        type Events = Arc<Mutex<Vec<(u64, Option<Outcome>)>>>;
+        async fn told(events: &Events, n: usize) {
+            while events.lock().unwrap().len() < n {
+                tokio::task::yield_now().await;
+            }
+        }
+        let events: Events = Arc::default();
+        let sink = events.clone();
+        let queue = InterceptQueue::with_listener(Arc::new(move |e: QueueEvent<'_>| {
+            sink.lock().unwrap().push(match e {
+                QueueEvent::Held(item) => (item.id, None),
+                QueueEvent::Resolved { id, outcome } => (id, Some(outcome)),
+            });
+        }));
+        let on = |timeout| InterceptSettings {
+            requests: Some(InterceptRules::default()),
+            timeout,
+            ..InterceptSettings::default()
+        };
+        let hold = || {
+            let q = queue.clone();
+            tokio::spawn(async move {
+                q.hold(Direction::Request, &info("a", "GET", "/"), pending)
+                    .await
+            })
+        };
+
+        // Resolved by the user (edited), then by turning interception off.
+        queue.set(on(None));
+        let a = hold();
+        told(&events, 1).await;
+        queue
+            .resolve(1, Verdict::ForwardEdited(Bytes::new()))
+            .unwrap();
+        a.await.unwrap();
+        let b = hold();
+        told(&events, 3).await;
+        queue.set(InterceptSettings::default());
+        b.await.unwrap();
+
+        // A timeout, then a connection that goes away.
+        queue.set(on(Some((Duration::from_millis(10), TimeoutAction::Drop))));
+        hold().await.unwrap();
+        queue.set(on(None));
+        let d = hold();
+        told(&events, 7).await;
+        d.abort();
+        let _ = d.await;
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                (1, None),
+                (1, Some(Outcome::Edited)),
+                (2, None),
+                (2, Some(Outcome::Forwarded)),
+                (3, None),
+                (3, Some(Outcome::Dropped)),
+                (4, None),
+                (4, Some(Outcome::Abandoned)),
+            ]
+        );
+        assert!(queue.list().is_empty());
     }
 
     #[tokio::test]

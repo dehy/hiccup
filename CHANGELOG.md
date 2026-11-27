@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Event stream. After `events.subscribe`, a control connection receives `exchange.request`, `exchange.response` (with the error, if any), `intercept.pending`, `intercept.resolved` and `proxy.state` events. Buffers are bounded: a subscriber that falls behind gets `events.lagged`, then is dropped. `hiccup events [--json] [--filter PREFIX]` streams them, escaping text from traffic on a terminal, and subscribes again after a lag.
+  - `Exchange::id` ties a request to its completion; `Proxy::with_request_observer` is told of each request before it is held or forwarded. `InterceptQueue::with_listener` is told of every change to the queue.
 - Target scope: include and exclude rules on protocol, host pattern, port and a path regex. In scope is what matches an include rule and no exclude rule; with no include rule, everything not excluded is. The scope belongs to the instance.
   - Control API: `scope.list`, `scope.add`, `scope.remove` and `scope.test`. CLI: `hiccup scope add|remove|list|test <url>`.
   - Intercept rules can be limited to the scope (`in_scope`, `hiccup intercept on --in-scope`), and history queries filter by it (`Filter::scope`).

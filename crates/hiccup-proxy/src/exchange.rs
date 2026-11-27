@@ -33,6 +33,9 @@ pub enum Modification {
 /// One request and its response, as seen by the proxy.
 #[derive(Clone, Debug)]
 pub struct Exchange {
+    /// Unique among a proxy's exchanges, from 1: it ties the request
+    /// observer's call to the completion's.
+    pub id: u64,
     /// When the request was received in full.
     pub started: SystemTime,
     /// From `started` until the exchange completed, including any time held
@@ -68,6 +71,8 @@ pub struct Exchange {
     pub error: Option<String>,
 }
 
-/// Called with every completed exchange. It runs on the connection's task:
-/// keep it fast (for example, send to a channel).
+/// Called with an exchange: when it completes, or, for a request observer,
+/// when its request has been read (before it is held or forwarded; no
+/// response yet). It runs on the connection's task: keep it fast (for
+/// example, send to a channel).
 pub type ExchangeObserver = Arc<dyn Fn(&Exchange) + Send + Sync>;

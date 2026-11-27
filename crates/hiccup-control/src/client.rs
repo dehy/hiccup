@@ -132,6 +132,26 @@ impl Client {
         std::mem::take(&mut self.notifications)
     }
 
+    /// Waits for the next notification (see `events.subscribe`), oldest
+    /// first, including those received while waiting for a response.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the connection closes or the instance sends something that
+    /// is not a notification.
+    pub async fn next_notification(&mut self) -> Result<Request, ClientError> {
+        if !self.notifications.is_empty() {
+            return Ok(self.notifications.remove(0));
+        }
+        match self.next_message().await? {
+            Incoming::Notification(n) => Ok(n),
+            Incoming::Response(r) => Err(ClientError::Protocol(format!(
+                "response to unknown request {}",
+                r.id
+            ))),
+        }
+    }
+
     async fn next_message(&mut self) -> Result<Incoming, ClientError> {
         let mut line = String::new();
         let n = (&mut self.reader)

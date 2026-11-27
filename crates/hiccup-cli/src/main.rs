@@ -3,6 +3,7 @@
 //! `hiccup`: the command-line interface to Hiccup.
 
 mod ca;
+mod events;
 mod instance;
 mod intercept;
 mod proxy;
@@ -71,6 +72,9 @@ enum Command {
     /// Which URLs are being tested.
     #[command(subcommand)]
     Scope(scope::ScopeCommand),
+    /// Stream what the instance does, live: requests, responses, held
+    /// messages, proxy state. With --json, one JSON object per line.
+    Events(events::EventsArgs),
     /// Running Hiccup instances.
     #[command(subcommand)]
     Instance(instance::InstanceCommand),
@@ -124,6 +128,7 @@ fn main() -> ExitCode {
         Command::Proxy(command) => proxy::run(command, &globals),
         Command::Intercept(command) => intercept::run(command, &globals),
         Command::Scope(command) => scope::run(command, &globals),
+        Command::Events(args) => events::run(&args, &globals),
         Command::Instance(command) => instance::run(command, &globals),
         Command::Ca(command) => match globals.data_dir() {
             Some(dir) => ca::run(command, &dir, globals.json),

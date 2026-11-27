@@ -18,6 +18,7 @@ fn exchange(upstream: &str, request: &[u8], response: Option<&[u8]>) -> Exchange
             .unwrap()
     });
     Exchange {
+        id: 1,
         started: SystemTime::now(),
         duration: Duration::from_millis(12),
         client: "127.0.0.1:5000".parse().unwrap(),

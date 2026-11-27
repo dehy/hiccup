@@ -90,6 +90,8 @@ impl Origin {
 struct Running {
     addr: SocketAddr,
     exchanges: Arc<Mutex<Vec<Exchange>>>,
+    /// IDs given to the request observer.
+    requests: Arc<Mutex<Vec<u64>>>,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -107,12 +109,17 @@ async fn start_proxy_with(configure: impl FnOnce(&mut ProxyConfig)) -> Running {
     };
     configure(&mut config);
     let exchanges = Arc::new(Mutex::new(Vec::new()));
-    let sink = exchanges.clone();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (sink, request_sink) = (exchanges.clone(), requests.clone());
     let proxy = Proxy::bind(config)
         .await
         .unwrap()
         .with_observer(Arc::new(move |e: &Exchange| {
             sink.lock().unwrap().push(e.clone())
+        }))
+        .with_request_observer(Arc::new(move |e: &Exchange| {
+            assert!(e.response.is_none());
+            request_sink.lock().unwrap().push(e.id);
         }));
     let addr = proxy.local_addrs()[0];
     let shutdown = CancellationToken::new();
@@ -120,6 +127,7 @@ async fn start_proxy_with(configure: impl FnOnce(&mut ProxyConfig)) -> Running {
     Running {
         addr,
         exchanges,
+        requests,
         shutdown,
         task,
     }
@@ -589,6 +597,7 @@ async fn a_body_is_relayed_as_it_arrives() {
         .unwrap();
     let mut buf = Vec::new();
     read_until(&mut client, &mut buf, b"first\r\n").await;
+    assert_eq!(*proxy.requests.lock().unwrap(), [1], "its request is known");
     assert!(
         proxy.exchanges.lock().unwrap().is_empty(),
         "not complete yet"
@@ -604,6 +613,7 @@ async fn a_body_is_relayed_as_it_arrives() {
         "kept whole: it is under the limit"
     );
     assert!(!exchanges[0].response_truncated && exchanges[0].error.is_none());
+    assert_eq!(exchanges[0].id, 1, "the request observer's ID");
 }
 
 #[tokio::test]
