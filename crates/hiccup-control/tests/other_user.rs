@@ -3,7 +3,7 @@
 //! Another local user cannot connect to an instance (ADR 0004).
 //!
 //! Connects as `nobody` with `sudo -n`, which CI runners allow. Skipped where
-//! `sudo` needs a password.
+//! `sudo` needs a password, except in CI (`CI` is set), where it fails instead.
 
 #![cfg(unix)]
 
@@ -45,6 +45,11 @@ fn can_sudo_as_nobody() -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn another_user_cannot_connect() {
     if !can_sudo_as_nobody() {
+        // CI runners allow it: never skip there silently.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI cannot run commands as nobody: the test would be skipped"
+        );
         eprintln!("cannot run commands as nobody without a password; skipping");
         return;
     }
