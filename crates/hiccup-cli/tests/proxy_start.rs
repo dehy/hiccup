@@ -113,6 +113,34 @@ fn foreground_proxy_forwards_a_request() {
 }
 
 #[test]
+fn listening_beyond_loopback_warns() {
+    let data = tempfile::tempdir().unwrap();
+    let warned = |listen: &str| {
+        let mut child = hiccup(&data)
+            .args(["proxy", "start", "--foreground", "--listen", listen])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut warned = false;
+        // The foreground proxy prints this last, once started.
+        loop {
+            let mut line = String::new();
+            assert!(stderr.read_line(&mut line).unwrap() > 0, "no start lines");
+            warned |= line.contains("reachable from other machines");
+            if line.contains("Press Ctrl+C") {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        warned
+    };
+    assert!(warned("0.0.0.0:0"));
+    assert!(!warned("127.0.0.1:0"));
+}
+
+#[test]
 fn invalid_upstream_options_are_rejected() {
     let data = tempfile::tempdir().unwrap();
     for (args, expected, code) in [
