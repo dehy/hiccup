@@ -44,6 +44,9 @@ struct Cli {
 
     /// Directory of the registry of running instances. Defaults to
     /// `$XDG_RUNTIME_DIR/hiccup`, or `hiccup/run` in the local data directory.
+    ///
+    /// It must be private to you: on Unix, Hiccup refuses one that other
+    /// users can access; on Windows, protect it yourself.
     #[arg(long, value_name = "DIR", env = "HICCUP_RUNTIME_DIR", global = true)]
     runtime_dir: Option<PathBuf>,
 

@@ -4,7 +4,6 @@
 
 use std::io;
 
-use interprocess::local_socket::tokio::Stream;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -12,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, ReadHal
 
 use crate::api::{InstanceInfo, method};
 use crate::protocol::{Incoming, MAX_MESSAGE_LEN, Request, RpcError, is_compatible};
-use crate::registry::{InstanceRecord, connect};
+use crate::registry::{InstanceRecord, Stream, connect};
 
 /// Why a call failed.
 #[derive(Debug, thiserror::Error)]

@@ -4,7 +4,7 @@
 
 API version **1.0**. Hiccup instances (`hiccup serve`, `hiccup proxy start --foreground`, the desktop apps) accept [JSON-RPC 2.0](https://www.jsonrpc.org/specification) requests, one JSON object per line, on a local socket: a Unix domain socket (mode `0600`, in a `0700` directory) on Linux and macOS, and a named pipe restricted to the current user on Windows. See [ADR 0004](adr/0004-cli-control-plane.md).
 
-Instances register in the per-user runtime directory (`$XDG_RUNTIME_DIR/hiccup` on Linux, `hiccup/run` in the local data directory elsewhere): `<name>.json` gives the instance's endpoint.
+Instances register in the per-user runtime directory (`$XDG_RUNTIME_DIR/hiccup` on Linux, `hiccup/run` in the local data directory elsewhere): `<name>.json` gives the instance's endpoint. The directory must be private to the user: on Unix, clients refuse one that other users can access, as they could plant records pointing to their own endpoints.
 
 Clients call `instance.info` first and refuse an instance whose major `api_version` differs. Minor versions only add methods, fields and notifications.
 

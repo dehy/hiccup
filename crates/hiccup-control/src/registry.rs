@@ -15,8 +15,6 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use interprocess::local_socket::tokio::{Listener, Stream, prelude::*};
-use interprocess::local_socket::{ListenerOptions, Name};
 use serde::{Deserialize, Serialize};
 
 use crate::API_VERSION;
@@ -119,13 +117,16 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// Fails if the directory exists but cannot be read.
+    /// Fails if the directory exists but cannot be read, or (on Unix) if
+    /// other users can access it: they could plant records pointing to
+    /// their own endpoints.
     pub fn records(&self) -> io::Result<Vec<InstanceRecord>> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
+        check_private(&self.dir)?;
         let mut records = Vec::new();
         for entry in entries {
             let path = entry?.path();
@@ -152,10 +153,10 @@ impl Registry {
     pub async fn live(&self) -> io::Result<Vec<InstanceRecord>> {
         let mut live = Vec::new();
         for record in self.records()? {
-            if probe(&record.endpoint).await {
-                live.push(record);
-            } else {
-                self.remove(&record.name);
+            match probe(&record.endpoint).await {
+                Probe::Dead => self.remove(&record.name),
+                // A busy or slow instance is still running: keep it.
+                Probe::Alive | Probe::Unknown => live.push(record),
             }
         }
         Ok(live)
@@ -197,7 +198,7 @@ impl Registry {
         }
         create_private_dir(&self.dir)?;
         if let Some(existing) = self.records()?.into_iter().find(|r| r.name == name) {
-            if probe(&existing.endpoint).await {
+            if probe(&existing.endpoint).await != Probe::Dead {
                 return Err(RegisterError::AlreadyRunning(name.to_owned()));
             }
             self.remove(name);
@@ -301,50 +302,136 @@ fn is_valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Whether an instance accepts connections at `endpoint`.
-async fn probe(endpoint: &str) -> bool {
-    matches!(
-        tokio::time::timeout(PROBE_TIMEOUT, connect(endpoint)).await,
-        Ok(Ok(_))
-    )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Probe {
+    /// It accepted a connection.
+    Alive,
+    /// Nothing listens there: the instance is gone.
+    Dead,
+    /// Busy or slow: assume it runs.
+    Unknown,
 }
 
-fn name(endpoint: &str) -> io::Result<Name<'_>> {
-    #[cfg(unix)]
-    {
-        use interprocess::local_socket::GenericFilePath;
-        endpoint.to_fs_name::<GenericFilePath>()
+/// Checks whether an instance runs at `endpoint`. Only a definite "nothing
+/// listens" counts as dead, so that a busy instance is never unregistered.
+async fn probe(endpoint: &str) -> Probe {
+    match tokio::time::timeout(PROBE_TIMEOUT, connect(endpoint)).await {
+        Ok(Ok(_)) => Probe::Alive,
+        Ok(Err(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Probe::Dead
+        }
+        Ok(Err(_)) | Err(_) => Probe::Unknown,
     }
+}
+
+/// A control connection.
+#[cfg(unix)]
+pub(crate) type Stream = tokio::net::UnixStream;
+/// A control connection.
+#[cfg(windows)]
+pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
+
+/// Accepts control connections.
+#[derive(Debug)]
+pub(crate) struct Listener {
+    #[cfg(unix)]
+    inner: tokio::net::UnixListener,
     #[cfg(windows)]
-    {
-        use interprocess::local_socket::GenericNamespaced;
-        endpoint.to_ns_name::<GenericNamespaced>()
+    inner: interprocess::local_socket::tokio::Listener,
+}
+
+impl Listener {
+    pub(crate) async fn accept(&self) -> io::Result<Stream> {
+        #[cfg(unix)]
+        {
+            self.inner.accept().await.map(|(stream, _)| stream)
+        }
+        #[cfg(windows)]
+        {
+            use interprocess::local_socket::traits::tokio::Listener as _;
+            self.inner.accept().await
+        }
     }
 }
 
 /// Connects to an instance's control endpoint.
+#[cfg(unix)]
 pub(crate) async fn connect(endpoint: &str) -> io::Result<Stream> {
-    Stream::connect(name(endpoint)?).await
+    tokio::net::UnixStream::connect(endpoint).await
 }
 
+/// Connects to an instance's control endpoint.
+#[cfg(windows)]
+pub(crate) async fn connect(endpoint: &str) -> io::Result<Stream> {
+    use interprocess::local_socket::GenericNamespaced;
+    use interprocess::local_socket::tokio::prelude::*;
+    Stream::connect(endpoint.to_ns_name::<GenericNamespaced>()?).await
+}
+
+#[cfg(unix)]
 fn listen(endpoint: &str) -> io::Result<Listener> {
-    let options = ListenerOptions::new().name(name(endpoint)?);
-    #[cfg(unix)]
-    let options = {
-        use interprocess::os::unix::local_socket::ListenerOptionsExt;
-        // A stale socket was found dead by `register`: replace it.
-        options.mode(0o600).try_overwrite(true)
-    };
-    #[cfg(windows)]
-    let options = {
-        use interprocess::os::windows::local_socket::ListenerOptionsExt;
-        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-        // Protected DACL: full access for the pipe's owner and SYSTEM only.
-        let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)(A;;GA;;;SY)")
-            .map_err(io::Error::other)?;
-        options.security_descriptor(SecurityDescriptor::deserialize(&sddl)?)
-    };
-    options.create_tokio()
+    use std::os::unix::fs::PermissionsExt;
+    // `register` found any previous socket dead: replace it.
+    match fs::remove_file(endpoint) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let inner = tokio::net::UnixListener::bind(endpoint)?;
+    // The 0700 directory already keeps other users out; 0600 is a second
+    // barrier should the directory ever be opened up.
+    fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600))?;
+    Ok(Listener { inner })
+}
+
+#[cfg(windows)]
+fn listen(endpoint: &str) -> io::Result<Listener> {
+    use interprocess::local_socket::tokio::prelude::*;
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
+    use interprocess::os::windows::local_socket::ListenerOptionsExt;
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    // Protected DACL: full access for the pipe's owner and SYSTEM only.
+    // Remote clients are rejected by default.
+    let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)(A;;GA;;;SY)")
+        .map_err(io::Error::other)?;
+    let inner = ListenerOptions::new()
+        .name(endpoint.to_ns_name::<GenericNamespaced>()?)
+        .security_descriptor(SecurityDescriptor::deserialize(&sddl)?)
+        .create_tokio()?;
+    Ok(Listener { inner })
+}
+
+/// Refuses a registry directory that other users can access.
+#[cfg(unix)]
+fn check_private(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // A readable directory whose group and other bits are clear is ours:
+    // another user's 0700 directory could not be read.
+    let mode = fs::metadata(dir)?.permissions().mode() & 0o777;
+    if mode & 0o077 == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is accessible to other users (mode {mode:o}); the instance registry must be \
+                 private (0700)",
+                dir.display()
+            ),
+        ))
+    }
+}
+
+/// Windows: the default directory (in `%LOCALAPPDATA%`) is private to the
+/// user; a custom one must be protected by the user.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn check_private(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn create_private_dir(dir: &Path) -> io::Result<()> {
@@ -433,6 +520,22 @@ mod tests {
         assert!(registry.live().await.unwrap().is_empty());
         assert!(registry.records().unwrap().is_empty(), "cleaned up");
         let _again = registry.register("x").await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_registry_others_can_access_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path().join("run"));
+        let _reg = registry.register("x").await.unwrap();
+        fs::set_permissions(registry.dir(), fs::Permissions::from_mode(0o755)).unwrap();
+        let err = registry.records().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            registry.select(None).await,
+            Err(SelectError::Io(_))
+        ));
     }
 
     #[cfg(unix)]

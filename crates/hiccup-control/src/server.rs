@@ -67,7 +67,7 @@ pub async fn serve(
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            accepted = interprocess::local_socket::traits::tokio::Listener::accept(&listener) => {
+            accepted = listener.accept() => {
                 match accepted {
                     Ok(stream) => {
                         let (handler, notifications, shutdown) =

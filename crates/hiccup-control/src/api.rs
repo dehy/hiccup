@@ -277,7 +277,9 @@ pub fn reference() -> String {
          restricted to the current user on Windows. See [ADR 0004](adr/0004-cli-control-plane.md).\n\n\
          Instances register in the per-user runtime directory (`$XDG_RUNTIME_DIR/hiccup` on \
          Linux, `hiccup/run` in the local data directory elsewhere): `<name>.json` gives the \
-         instance's endpoint.\n\n\
+         instance's endpoint. The directory must be private to the user: on Unix, clients refuse one \
+         that other users can access, as they could plant records pointing to their own \
+         endpoints.\n\n\
          Clients call `instance.info` first and refuse an instance whose major `api_version` \
          differs. Minor versions only add methods, fields and notifications.\n\n\
          Errors use the JSON-RPC codes (-32700 parse error, -32600 invalid request, -32601 \
