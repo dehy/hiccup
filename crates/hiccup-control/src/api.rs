@@ -38,6 +38,14 @@ pub mod method {
     pub const INTERCEPT_DROP: &str = "intercept.drop";
     /// Forward every held item unchanged.
     pub const INTERCEPT_FORWARD_ALL: &str = "intercept.forward_all";
+    /// List the scope rules.
+    pub const SCOPE_LIST: &str = "scope.list";
+    /// Add a scope rule.
+    pub const SCOPE_ADD: &str = "scope.add";
+    /// Remove a scope rule.
+    pub const SCOPE_REMOVE: &str = "scope.remove";
+    /// Tell whether a URL is in scope.
+    pub const SCOPE_TEST: &str = "scope.test";
 }
 
 /// Notification names.
@@ -167,6 +175,9 @@ pub struct InterceptRulesParams {
     /// query). Absent: any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Only what is in scope (see `scope.add`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub in_scope: bool,
 }
 
 /// Parameters of `intercept.set`, and the result of `intercept.status`.
@@ -255,6 +266,59 @@ pub struct ForwardAllResult {
     pub forwarded: usize,
 }
 
+/// One scope rule. Every criterion set must match.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeRuleParams {
+    /// Excludes what the rule matches, instead of including it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub exclude: bool,
+    /// `"http"` or `"https"`. Absent: both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// A host pattern (`example.com`, `*.example.com`, `*`). Absent: any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The port. Absent: any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// A regular expression matched against the path and query. Absent: any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Result of `scope.list`, `scope.add` and `scope.remove`. In scope is what
+/// matches an include rule and no exclude rule; with no include rule,
+/// everything not excluded is in scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRules {
+    /// The rules, in the order they were added.
+    pub rules: Vec<ScopeRuleParams>,
+}
+
+/// Parameters of `scope.remove`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRemoveParams {
+    /// The rule's index in `rules`, from 0.
+    pub index: usize,
+}
+
+/// Parameters of `scope.test`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeTestParams {
+    /// An `http://` or `https://` URL.
+    pub url: String,
+}
+
+/// Result of `scope.test`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeTestResult {
+    /// Whether the URL is in scope.
+    pub in_scope: bool,
+}
+
 /// Documentation of one method or notification.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageDoc {
@@ -304,12 +368,30 @@ fn example_intercept() -> InterceptStatus {
                 hosts: vec!["*.example.com".to_owned()],
                 methods: vec!["POST".to_owned()],
                 path: Some("^/api/".to_owned()),
+                in_scope: true,
             }),
             responses: None,
             timeout_ms: None,
             on_timeout: None,
         },
         pending: 1,
+    }
+}
+
+fn example_scope() -> ScopeRules {
+    ScopeRules {
+        rules: vec![
+            ScopeRuleParams {
+                host: Some("*.example.com".to_owned()),
+                protocol: Some("https".to_owned()),
+                ..ScopeRuleParams::default()
+            },
+            ScopeRuleParams {
+                exclude: true,
+                path: Some("^/logout".to_owned()),
+                ..ScopeRuleParams::default()
+            },
+        ],
     }
 }
 
@@ -464,6 +546,46 @@ pub const METHODS: &[MessageDoc] = &[
         result: || to_value(&ForwardAllResult { forwarded: 3 }),
         errors: &[],
     },
+    MessageDoc {
+        name: method::SCOPE_LIST,
+        summary: "List the scope rules. They belong to the instance; intercept rules with \
+                  `in_scope` use them.",
+        params: || json!({}),
+        result: || to_value(&example_scope()),
+        errors: &[],
+    },
+    MessageDoc {
+        name: method::SCOPE_ADD,
+        summary: "Add a scope rule at the end. Returns every rule.",
+        params: || to_value(&example_scope().rules[0]),
+        result: || to_value(&example_scope()),
+        errors: &[(
+            -32602,
+            "the protocol, host pattern or regular expression is invalid",
+        )],
+    },
+    MessageDoc {
+        name: method::SCOPE_REMOVE,
+        summary: "Remove a scope rule. Returns the remaining rules.",
+        params: || to_value(&ScopeRemoveParams { index: 1 }),
+        result: || {
+            to_value(&ScopeRules {
+                rules: example_scope().rules[..1].to_vec(),
+            })
+        },
+        errors: &[(-32602, "no rule has this index")],
+    },
+    MessageDoc {
+        name: method::SCOPE_TEST,
+        summary: "Tell whether a URL is in scope.",
+        params: || {
+            to_value(&ScopeTestParams {
+                url: "https://app.example.com/login".to_owned(),
+            })
+        },
+        result: || to_value(&ScopeTestResult { in_scope: true }),
+        errors: &[(-32602, "the URL is not an `http://` or `https://` URL")],
+    },
 ];
 
 /// Every notification an instance sends.
@@ -548,6 +670,15 @@ mod tests {
                 }
                 method::INTERCEPT_FORWARD => {
                     drop(serde_json::from_value::<ForwardParams>(params).unwrap())
+                }
+                method::SCOPE_ADD => {
+                    drop(serde_json::from_value::<ScopeRuleParams>(params).unwrap());
+                }
+                method::SCOPE_REMOVE => {
+                    serde_json::from_value::<ScopeRemoveParams>(params).unwrap();
+                }
+                method::SCOPE_TEST => {
+                    drop(serde_json::from_value::<ScopeTestParams>(params).unwrap());
                 }
                 _ => {}
             }

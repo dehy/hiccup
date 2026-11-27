@@ -172,6 +172,7 @@ Result:
     "hosts": [
       "*.example.com"
     ],
+    "in_scope": true,
     "methods": [
       "POST"
     ],
@@ -193,6 +194,7 @@ Parameters:
     "hosts": [
       "*.example.com"
     ],
+    "in_scope": true,
     "methods": [
       "POST"
     ],
@@ -211,6 +213,7 @@ Result:
     "hosts": [
       "*.example.com"
     ],
+    "in_scope": true,
     "methods": [
       "POST"
     ],
@@ -346,6 +349,120 @@ Result:
   "forwarded": 3
 }
 ```
+
+### `scope.list`
+
+List the scope rules. They belong to the instance; intercept rules with `in_scope` use them.
+
+Parameters:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "rules": [
+    {
+      "host": "*.example.com",
+      "protocol": "https"
+    },
+    {
+      "exclude": true,
+      "path": "^/logout"
+    }
+  ]
+}
+```
+
+### `scope.add`
+
+Add a scope rule at the end. Returns every rule.
+
+Parameters:
+
+```json
+{
+  "host": "*.example.com",
+  "protocol": "https"
+}
+```
+
+Result:
+
+```json
+{
+  "rules": [
+    {
+      "host": "*.example.com",
+      "protocol": "https"
+    },
+    {
+      "exclude": true,
+      "path": "^/logout"
+    }
+  ]
+}
+```
+
+Errors:
+
+- `-32602`: the protocol, host pattern or regular expression is invalid
+
+### `scope.remove`
+
+Remove a scope rule. Returns the remaining rules.
+
+Parameters:
+
+```json
+{
+  "index": 1
+}
+```
+
+Result:
+
+```json
+{
+  "rules": [
+    {
+      "host": "*.example.com",
+      "protocol": "https"
+    }
+  ]
+}
+```
+
+Errors:
+
+- `-32602`: no rule has this index
+
+### `scope.test`
+
+Tell whether a URL is in scope.
+
+Parameters:
+
+```json
+{
+  "url": "https://app.example.com/login"
+}
+```
+
+Result:
+
+```json
+{
+  "in_scope": true
+}
+```
+
+Errors:
+
+- `-32602`: the URL is not an `http://` or `https://` URL
 
 ## Notifications
 
