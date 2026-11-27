@@ -7,23 +7,27 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// `hiccup` with a throwaway data directory, so that tests never touch the
-/// user's CA.
+/// `hiccup` with throwaway data and runtime directories, so that tests never
+/// touch the user's CA or instances.
 fn hiccup(data_dir: &tempfile::TempDir) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hiccup"));
     cmd.arg("--data-dir")
         .arg(data_dir.path())
-        .env_remove("HICCUP_DATA_DIR");
+        .arg("--runtime-dir")
+        .arg(data_dir.path().join("run"))
+        .env_remove("HICCUP_DATA_DIR")
+        .env_remove("HICCUP_RUNTIME_DIR")
+        .env_remove("HICCUP_INSTANCE");
     cmd
 }
 
 #[test]
-fn without_foreground_explains_and_fails() {
+fn without_an_instance_explains_and_fails() {
     let data = tempfile::tempdir().unwrap();
     let out = hiccup(&data).args(["proxy", "start"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--foreground"), "{stderr}");
+    assert!(stderr.contains("hiccup serve"), "{stderr}");
 }
 
 #[test]

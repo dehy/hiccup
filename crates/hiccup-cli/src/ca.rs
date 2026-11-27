@@ -57,10 +57,14 @@ pub struct RegenerateArgs {
     yes: bool,
 }
 
-pub fn run(command: CaCommand, data_dir: &Path) -> ExitCode {
+pub fn run(command: CaCommand, data_dir: &Path, json: bool) -> ExitCode {
     match command {
         CaCommand::Info => load(data_dir).map_or(ExitCode::FAILURE, |ca| {
-            print!("{}", describe(&ca, data_dir));
+            if json {
+                crate::print_json(&info_json(&ca, data_dir));
+            } else {
+                print!("{}", describe(&ca, data_dir));
+            }
             ExitCode::SUCCESS
         }),
         CaCommand::Export(args) => {
@@ -71,7 +75,7 @@ pub fn run(command: CaCommand, data_dir: &Path) -> ExitCode {
 }
 
 /// Loads the CA, generating it on first use. Errors are reported on stderr.
-pub fn load(data_dir: &Path) -> Option<CertificateAuthority> {
+fn load(data_dir: &Path) -> Option<CertificateAuthority> {
     match CertificateAuthority::load_or_generate(data_dir) {
         Ok((ca, created)) => {
             if created {
@@ -146,14 +150,30 @@ fn regenerate(args: &RegenerateArgs, data_dir: &Path) -> ExitCode {
     }
 }
 
-fn describe(ca: &CertificateAuthority, data_dir: &Path) -> String {
-    let info = ca.info();
-    let fingerprint = info
+fn fingerprint(ca: &CertificateAuthority) -> String {
+    ca.info()
         .sha256
         .iter()
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
-        .join(":");
+        .join(":")
+}
+
+fn info_json(ca: &CertificateAuthority, data_dir: &Path) -> serde_json::Value {
+    let info = ca.info();
+    serde_json::json!({
+        "certificate": data_dir.join(CERT_FILE),
+        "private_key": data_dir.join(KEY_FILE),
+        "subject": info.subject,
+        "not_before": info.not_before.unix_timestamp(),
+        "not_after": info.not_after.unix_timestamp(),
+        "sha256": fingerprint(ca),
+    })
+}
+
+fn describe(ca: &CertificateAuthority, data_dir: &Path) -> String {
+    let info = ca.info();
+    let fingerprint = fingerprint(ca);
     let mut out = String::new();
     let _ = writeln!(out, "Certificate: {}", data_dir.join(CERT_FILE).display());
     let _ = writeln!(out, "Private key: {}", data_dir.join(KEY_FILE).display());
