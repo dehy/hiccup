@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `hiccup proxy start` warns when the proxy listens beyond loopback: anyone who can reach it can use it without authentication.
 - `hiccup-store`: proxy history in a SQLite project file (`.hiccup`). Every exchange keeps its exact bytes (received, forwarded, interim, response, delivered), timings, TLS flag and edited flags. Raw messages live in a separate blob table, and schema migrations are tracked with `user_version`.
   - Newest-first pages filtered by host, method, status, media type prefix and byte search.
   - 10k exchanges: p95 under 50 ms to insert and to query (`cargo test --release -p hiccup-store -- --ignored`).

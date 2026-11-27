@@ -206,6 +206,13 @@ impl CertificateAuthority {
     ///
     /// See [`load`](Self::load) and [`save`](Self::save).
     pub fn load_or_generate(dir: &Path) -> Result<(Self, bool), CaError> {
+        // Instances share `dir`: two generating at once could leave one CA's
+        // key next to the other's certificate. Released when dropped.
+        let io_err = |path: PathBuf| move |source| CaError::Io { path, source };
+        create_private_dir(dir).map_err(io_err(dir.to_owned()))?;
+        let lock_path = dir.join("ca.lock");
+        let lock = fs::File::create(&lock_path).map_err(io_err(lock_path.clone()))?;
+        lock.lock().map_err(io_err(lock_path))?;
         if let Some(ca) = Self::load(dir)? {
             return Ok((ca, false));
         }
