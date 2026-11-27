@@ -199,7 +199,10 @@ impl Registry {
         create_private_dir(&self.dir)?;
         // Held while the instance runs, and released by the OS if it dies:
         // two instances starting at once cannot both take the name.
-        let lock = fs::File::create(self.dir.join(format!("{name}.lock")))?;
+        let lock_path = self.dir.join(format!("{name}.lock"));
+        let lock = tokio::task::spawn_blocking(move || fs::File::create(lock_path))
+            .await
+            .map_err(io::Error::other)??;
         match lock.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => {
