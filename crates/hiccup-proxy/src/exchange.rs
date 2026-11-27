@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! The record of one proxied request/response exchange.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use hiccup_http::{Request, Response};
+
+/// A change Hiccup made to a message before forwarding it. Every change is
+/// recorded: nothing is altered silently (ADR 0003).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Modification {
+    /// An absolute-form request target was rewritten to origin-form for the
+    /// origin server (RFC 9112 §3.2.1).
+    TargetRewritten {
+        /// The target as received, e.g. `http://example.com/a`.
+        original: Bytes,
+        /// The target as forwarded, e.g. `/a`.
+        rewritten: Bytes,
+    },
+}
+
+/// One request and its response, as seen by the proxy.
+#[derive(Clone, Debug)]
+pub struct Exchange {
+    /// The client's address.
+    pub client: SocketAddr,
+    /// The upstream `host:port`.
+    pub upstream: String,
+    /// The request exactly as received from the client.
+    pub received: Request,
+    /// The bytes forwarded upstream.
+    pub forwarded: Bytes,
+    /// Changes between `received` and `forwarded`.
+    pub modifications: Vec<Modification>,
+    /// Interim (1xx) responses relayed before the final response.
+    pub interim: Vec<Response>,
+    /// The final response, or `None` if the exchange failed.
+    pub response: Option<Response>,
+    /// Why the exchange failed, if it did. Hiccup then answered the client
+    /// with an error response of its own.
+    pub error: Option<String>,
+}
+
+/// Called with every completed exchange. It runs on the connection's task:
+/// keep it fast (for example, send to a channel).
+pub type ExchangeObserver = Arc<dyn Fn(&Exchange) + Send + Sync>;
