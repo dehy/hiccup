@@ -24,9 +24,11 @@ mod io;
 mod server;
 mod target;
 mod tls;
+mod upstream;
 
 pub use ca::{CaError, CaInfo, CertificateAuthority};
 pub use config::ProxyConfig;
 pub use exchange::{Exchange, ExchangeObserver, Modification};
 pub use server::Proxy;
 pub use target::{AbsoluteTarget, Authority, HostPattern, TargetError};
+pub use upstream::{ClientCert, TlsVersion, UpstreamConfig};

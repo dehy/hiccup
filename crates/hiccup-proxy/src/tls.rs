@@ -11,8 +11,9 @@ use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signat
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme};
 
-use crate::CertificateAuthority;
 use crate::ca::CaError;
+use crate::upstream::{ClientCert, first_match};
+use crate::{CertificateAuthority, HostPattern, UpstreamConfig};
 
 /// Leaf certificates kept in memory.
 const CACHE_CAPACITY: usize = 1000;
@@ -28,31 +29,41 @@ pub(crate) struct Interceptor {
     leaf_key: KeyPair,
     provider: Arc<CryptoProvider>,
     cache: Mutex<Cache>,
-    client: Arc<ClientConfig>,
+    /// Upstream configurations: one per client certificate rule, then the
+    /// default.
+    clients: Vec<(HostPattern, Arc<ClientConfig>)>,
+    default_client: Arc<ClientConfig>,
 }
 
 impl Interceptor {
-    pub(crate) fn new(ca: Arc<CertificateAuthority>) -> Result<Self, CaError> {
+    pub(crate) fn new(
+        ca: Arc<CertificateAuthority>,
+        upstream: &UpstreamConfig,
+    ) -> Result<Self, CaError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut client = ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .map_err(tls_setup)?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider.clone())))
-            .with_no_client_auth();
-        client.alpn_protocols = vec![ALPN.to_vec()];
+        let clients = upstream
+            .client_certs
+            .iter()
+            .map(|(pattern, cert)| {
+                let config = client_config(&provider, upstream, Some(cert))?;
+                Ok((pattern.clone(), config))
+            })
+            .collect::<Result<_, CaError>>()?;
         Ok(Self {
             ca,
             leaf_key: KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?,
+            default_client: client_config(&provider, upstream, None)?,
+            clients,
             provider,
             cache: Mutex::new(Cache::default()),
-            client: Arc::new(client),
         })
     }
 
-    /// The configuration for connections to upstream servers.
-    pub(crate) fn client_config(&self) -> Arc<ClientConfig> {
-        self.client.clone()
+    /// The configuration for connections to the upstream `host`.
+    pub(crate) fn client_config(&self, host: &str) -> Arc<ClientConfig> {
+        first_match(&self.clients, host)
+            .unwrap_or(&self.default_client)
+            .clone()
     }
 
     /// A server configuration presenting a certificate for `host`, signed by
@@ -78,6 +89,46 @@ impl Interceptor {
             .insert(host, config.clone());
         Ok(config)
     }
+}
+
+fn client_config(
+    provider: &Arc<CryptoProvider>,
+    upstream: &UpstreamConfig,
+    cert: Option<&ClientCert>,
+) -> Result<Arc<ClientConfig>, CaError> {
+    let versions: Vec<_> = [crate::TlsVersion::Tls12, crate::TlsVersion::Tls13]
+        .into_iter()
+        .filter(|v| (upstream.tls_min..=upstream.tls_max).contains(v))
+        .map(crate::TlsVersion::rustls)
+        .collect();
+    if versions.is_empty() {
+        return Err(CaError::Tls(format!(
+            "no TLS version between {} and {}",
+            upstream.tls_min, upstream.tls_max
+        )));
+    }
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&versions)
+        .map_err(tls_setup)?;
+    let builder = if upstream.verify {
+        let verifier =
+            rustls_platform_verifier::Verifier::new(provider.clone()).map_err(tls_setup)?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider.clone())))
+    };
+    let mut config = match cert {
+        Some(cert) => builder
+            .with_client_auth_cert(cert.chain.clone(), cert.key.clone_key())
+            .map_err(tls_setup)?,
+        None => builder.with_no_client_auth(),
+    };
+    config.alpn_protocols = vec![ALPN.to_vec()];
+    Ok(Arc::new(config))
 }
 
 fn tls_setup(e: rustls::Error) -> CaError {
@@ -174,7 +225,7 @@ mod tests {
     #[test]
     fn cache_evicts_the_least_recently_used() {
         let ca = Arc::new(CertificateAuthority::generate().unwrap());
-        let interceptor = Interceptor::new(ca).unwrap();
+        let interceptor = Interceptor::new(ca, &UpstreamConfig::default()).unwrap();
         let config = interceptor.server_config("a.test").unwrap();
         // Case-insensitive, and served from the cache.
         assert!(Arc::ptr_eq(

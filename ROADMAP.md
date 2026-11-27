@@ -57,6 +57,7 @@ Each item becomes its own milestone when it is scheduled.
 - WebSockets interception and history
 - Match & replace rules
 - Upstream HTTP/SOCKS proxy chaining
+- Legacy TLS (1.0/1.1) to upstream servers, through an optional OpenSSL backend (rustls implements TLS 1.2 and 1.3 only)
 - Invisible (transparent) proxy mode
 - Decoder (encode/decode/hash)
 - Comparer (diff of requests/responses)

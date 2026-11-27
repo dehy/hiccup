@@ -373,7 +373,7 @@ async fn open_upstream(
     mode: &Mode,
     ctx: &Context,
 ) -> Result<Box<dyn Io>, String> {
-    let tcp = connect(authority, ctx.config.connect_timeout)
+    let tcp = connect(authority, ctx)
         .await
         .map_err(|e| format!("cannot connect to {authority}: {e}"))?;
     let Mode::Intercepted { server_name, .. } = mode else {
@@ -383,8 +383,8 @@ async fn open_upstream(
         .interceptor
         .as_ref()
         .expect("tunnels are intercepted only with an interceptor");
-    let handshake =
-        TlsConnector::from(interceptor.client_config()).connect(server_name.clone(), tcp);
+    let handshake = TlsConnector::from(interceptor.client_config(&authority.host))
+        .connect(server_name.clone(), tcp);
     match tokio::time::timeout(ctx.config.connect_timeout, handshake).await {
         Ok(Ok(tls)) => Ok(Box::new(tls)),
         Ok(Err(e)) => Err(format!("TLS handshake with {authority} failed: {e}")),
@@ -496,7 +496,7 @@ async fn handle_connect(
     // A TLS record starts with the handshake content type (RFC 8446 §5.1).
     if pending[0] != 0x16 {
         debug!("the tunnel does not carry TLS; relaying it");
-        let mut upstream = connect(&authority, ctx.config.connect_timeout).await?;
+        let mut upstream = connect(&authority, ctx).await?;
         return tunnel(&mut client, &pending, &mut upstream, &[]).await;
     }
 
@@ -537,8 +537,14 @@ async fn handle_connect(
         };
     debug!(%host, "TLS intercepted");
 
-    let server_name =
-        ServerName::try_from(host).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // The client's server name, unless overridden for this host.
+    let upstream_name = ctx
+        .config
+        .upstream
+        .sni_for(&authority.host)
+        .map_or(host, str::to_owned);
+    let server_name = ServerName::try_from(upstream_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mode = Mode::Intercepted {
         authority,
         server_name,
@@ -554,7 +560,7 @@ async fn pass_through(
     authority: &Authority,
     ctx: &Context,
 ) -> io::Result<()> {
-    let mut upstream = match connect(authority, ctx.config.connect_timeout).await {
+    let mut upstream = match connect(authority, ctx).await {
         Ok(s) => s,
         Err(e) => {
             let detail = format!("cannot connect to {authority}: {e}");
@@ -595,13 +601,21 @@ where
 // ---------------------------------------------------------------------------
 // Helpers
 
-async fn connect(authority: &Authority, timeout: Duration) -> io::Result<TcpStream> {
-    let stream = tokio::time::timeout(
-        timeout,
-        TcpStream::connect((authority.host.as_str(), authority.port)),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))??;
+/// Opens a TCP connection to `authority`, or to its `--resolve` override.
+async fn connect(authority: &Authority, ctx: &Context) -> io::Result<TcpStream> {
+    let override_ip = ctx.config.upstream.resolve_for(&authority.host);
+    if let Some(ip) = override_ip {
+        debug!(%authority, %ip, "resolve override");
+    }
+    let connecting = async {
+        match override_ip {
+            Some(ip) => TcpStream::connect((ip, authority.port)).await,
+            None => TcpStream::connect((authority.host.as_str(), authority.port)).await,
+        }
+    };
+    let stream = tokio::time::timeout(ctx.config.connect_timeout, connecting)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))??;
     stream.set_nodelay(true)?;
     Ok(stream)
 }

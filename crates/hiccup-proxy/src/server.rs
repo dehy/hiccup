@@ -71,11 +71,16 @@ impl Proxy {
     ///
     /// Without it, every tunnel is relayed untouched.
     ///
+    /// Upstream TLS follows [`ProxyConfig::upstream`] as given to
+    /// [`bind`](Self::bind).
+    ///
     /// # Errors
     ///
-    /// Fails if the key for leaf certificates cannot be generated.
+    /// Fails if the key for leaf certificates cannot be generated, or if the
+    /// upstream options are invalid (an empty TLS version range, or a client
+    /// certificate whose key type is not supported).
     pub fn intercept_tls(mut self, ca: Arc<CertificateAuthority>) -> Result<Self, CaError> {
-        self.interceptor = Some(Interceptor::new(ca)?);
+        self.interceptor = Some(Interceptor::new(ca, &self.config.upstream)?);
         Ok(self)
     }
 

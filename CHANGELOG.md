@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Upstream connection options for `hiccup proxy start`:
+  - `--verify-upstream` verifies server certificates against the OS trust store. It is off by default, and startup warns about it.
+  - `--upstream-tls-min` and `--upstream-tls-max` take 1.2 or 1.3; rustls cannot reach TLS 1.0/1.1-only servers.
+  - Per-host rules, `HOST=VALUE`, with the same patterns as `--tls-passthrough`; the first match applies:
+    - `--upstream-sni` overrides the server name;
+    - `--resolve` connects to a fixed IP instead of resolving the host;
+    - `--client-cert HOST=CERT[,KEY]` presents a client certificate.
+  - `--connect-timeout` and `--read-timeout`, in seconds.
 - HTTPS interception in `CONNECT` tunnels.
   - The client gets a certificate for the host (from SNI, else the `CONNECT` target; DNS name or IP), signed by the local CA and cached per host. ALPN is limited to `http/1.1`.
   - Requests inside the tunnel are forwarded as received, over TLS, and recorded like plain ones (`Exchange::tls`). Upstream certificates are not verified yet (#11).
