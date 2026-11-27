@@ -98,26 +98,39 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
 
   coverage:
-    name: Coverage (informational)
+    name: Coverage and SonarQube Cloud (informational)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # SonarQube Cloud needs history to find new code.
       - run: rustup toolchain install && rustup component add llvm-tools
       - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Coverage summary
+      - name: Coverage
         run: |
+          cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
           {
             echo '## Coverage'
             echo '```'
-            cargo llvm-cov --workspace --all-features --locked --summary-only
+            cargo llvm-cov report --summary-only
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # Secrets are not available to pull requests from forks: skip the scan.
+      - name: Check for the SonarQube Cloud token
+        id: sonar
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: echo "enabled=${SONAR_TOKEN:+true}" >> "$GITHUB_OUTPUT"
+      - name: SonarQube Cloud scan
+        if: steps.sonar.outputs.enabled == 'true'
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   fuzz:
     name: Fuzz (${{ matrix.target }}, informational)

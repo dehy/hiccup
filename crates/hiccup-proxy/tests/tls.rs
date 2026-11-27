@@ -375,9 +375,10 @@ async fn a_client_that_rejects_the_certificate_does_not_break_the_proxy() {
 /// TLS library (OpenSSL, LibreSSL or Schannel). Skipped without curl.
 #[tokio::test(flavor = "multi_thread")]
 async fn curl_trusts_the_intercepted_certificate() {
-    if std::process::Command::new("curl")
+    if tokio::process::Command::new("curl")
         .arg("--version")
         .output()
+        .await
         .is_err()
     {
         eprintln!("curl not found; skipping");

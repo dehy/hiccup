@@ -37,10 +37,10 @@ if [[ $DRY_RUN -eq 0 ]]; then
   echo "Target repository: $REPO"
 fi
 
-title_of()  { sed -n '1s/^# //p' "$1"; }
-labels_of() { sed -n 's/^labels: //p' "$1" | head -n1; }
+title_of()  { local file="$1"; sed -n '1s/^# //p' "$file"; }
+labels_of() { local file="$1"; sed -n 's/^labels: //p' "$file" | head -n1; }
 # Body = everything after the title and labels lines, leading blank lines trimmed.
-body_of()   { sed -e '1d' -e '/^labels: /d' "$1" | sed '/./,$!d'; }
+body_of()   { local file="$1"; sed -e '1d' -e '/^labels: /d' "$file" | sed '/./,$!d'; }
 
 label_color() {
   case "$1" in
@@ -74,7 +74,8 @@ if [[ $DRY_RUN -eq 0 ]]; then
   existing_issues="$(gh issue list --repo "$REPO" --state all --limit 5000 --json title --jq '.[].title')"
 fi
 
-contains() { grep -Fxq -- "$2" <<<"$1"; }
+# contains LIST ITEM: whether ITEM is one of the lines of LIST.
+contains() { local list="$1" item="$2"; grep -Fxq -- "$item" <<<"$list"; }
 
 echo "== Labels (${#LABELS[@]})"
 for l in "${LABELS[@]}"; do
