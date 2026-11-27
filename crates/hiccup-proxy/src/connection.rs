@@ -229,6 +229,8 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let mut exchange = Exchange {
+        started: std::time::SystemTime::now(),
+        duration: std::time::Duration::ZERO,
         client: peer,
         upstream: authority.to_string(),
         tls: matches!(mode, Mode::Intercepted { .. }),
@@ -355,10 +357,10 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     exchange.response = Some(response);
     if let Err(e) = written {
         exchange.error = Some(format!("cannot send the response to the client: {e}"));
-        notify(ctx, &exchange);
+        notify(ctx, &mut exchange);
         return Err(e);
     }
-    notify(ctx, &exchange);
+    notify(ctx, &mut exchange);
 
     if framing == Framing::Tunnel {
         // 101 Switching Protocols: the connection now carries another protocol.
@@ -745,7 +747,8 @@ async fn connect(authority: &Authority, ctx: &Context) -> io::Result<TcpStream> 
     Ok(stream)
 }
 
-fn notify(ctx: &Context, exchange: &Exchange) {
+fn notify(ctx: &Context, exchange: &mut Exchange) {
+    exchange.duration = exchange.started.elapsed().unwrap_or_default();
     if let Some(observer) = &ctx.observer {
         observer(exchange);
     }
@@ -762,7 +765,7 @@ async fn fail<S: AsyncWrite + AsyncRead + Unpin>(
     warn!(error = %detail, "exchange failed");
     // Record first: writing the error lingers on the connection.
     exchange.error = Some(detail.clone());
-    notify(ctx, &exchange);
+    notify(ctx, &mut exchange);
     write_error(client, status, reason, &detail).await;
     Ok(Next::Close)
 }
