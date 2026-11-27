@@ -141,6 +141,43 @@ fn filters_and_pages() {
     assert_eq!(next.iter().map(|s| s.id).collect::<Vec<_>>(), [a]);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_new_project_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.hiccup");
+    let mut store = Store::open(&path).unwrap();
+    store.insert(&exchange("a.test:80", GET, None)).unwrap();
+    for file in ["p.hiccup", "p.hiccup-wal", "p.hiccup-shm"] {
+        let mode = std::fs::metadata(dir.path().join(file))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{file}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_new_project_is_private() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.hiccup");
+    let mut store = Store::open(&path).unwrap();
+    store.insert(&exchange("a.test:80", GET, None)).unwrap();
+    for file in ["p.hiccup", "p.hiccup-wal", "p.hiccup-shm"] {
+        let out = std::process::Command::new("icacls")
+            .arg(dir.path().join(file))
+            .output()
+            .unwrap();
+        let acl = String::from_utf8_lossy(&out.stdout);
+        // No inherited entry, and only the owner and SYSTEM: SIDs print as
+        // localized names, so count the entries instead.
+        assert!(!acl.contains("(I)"), "{file}: {acl}");
+        assert_eq!(acl.matches(":(F)").count(), 2, "{file}: {acl}");
+    }
+}
+
 #[test]
 fn a_newer_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();

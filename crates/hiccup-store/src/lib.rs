@@ -54,6 +54,9 @@ pub enum StoreError {
     /// SQLite failed.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    /// The project file cannot be created or made private.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     /// The project was written by a newer Hiccup.
     #[error("the project uses schema version {0}, newer than this Hiccup supports")]
     TooNew(usize),
@@ -142,9 +145,17 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails if the file cannot be opened, is not a Hiccup project, or was
-    /// written by a newer Hiccup.
+    /// Fails if the file cannot be created or opened, is not a Hiccup
+    /// project, or was written by a newer Hiccup.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        // History holds credentials: a new project is readable by its owner
+        // only. SQLite gives its -wal and -shm files the same mode.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(
+            std::fs::OpenOptions::new().write(true).create(true),
+            0o600,
+        )
+        .open(path)?;
         let mut db = Connection::open(path)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         // With WAL, NORMAL survives application crashes; only a power loss
@@ -152,6 +163,8 @@ impl Store {
         db.pragma_update(None, "synchronous", "NORMAL")?;
         db.pragma_update(None, "foreign_keys", true)?;
         migrate(&mut db)?;
+        #[cfg(windows)]
+        restrict(path)?;
         Ok(Self { db })
     }
 
@@ -340,6 +353,38 @@ fn migrate(db: &mut Connection) -> Result<(), StoreError> {
         tx.pragma_update(None, "user_version", applied + 1)?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+/// Gives the project's files the control pipe's protected DACL: full access
+/// for their owner and `SYSTEM` only. Files on Windows inherit their
+/// directory's ACL, and SQLite creates its -wal and -shm files anew, so this
+/// runs on every open, once they exist.
+// shortcut: runs the built-in icacls (no `unsafe` for the Win32 security API);
+// set the DACL directly if opening a project ever needs to be faster.
+#[cfg(windows)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    let system = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let icacls = Path::new(&system).join(r"System32\icacls.exe");
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        if !Path::new(&file).exists() {
+            continue;
+        }
+        // OWNER RIGHTS and SYSTEM, as SIDs: account names are localized.
+        let output = std::process::Command::new(&icacls)
+            .arg(&file)
+            .args(["/inheritance:r", "/grant:r", "*S-1-3-4:F", "*S-1-5-18:F"])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "icacls failed on {}: {}",
+                Path::new(&file).display(),
+                String::from_utf8_lossy(&output.stdout).trim()
+            )));
+        }
+    }
     Ok(())
 }
 
