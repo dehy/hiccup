@@ -397,11 +397,9 @@ async fn connect_tunnels_bytes_both_ways() {
 #[tokio::test]
 async fn errors_are_answered_by_hiccup() {
     let proxy = start_proxy().await;
-    // A port that refuses connections.
-    let closed = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap()
-    };
+    // Nothing can listen on port 0, so connecting fails at once on every OS
+    // (a freed ephemeral port could be taken by a test running meanwhile).
+    let closed: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let cases = [
         (
             format!("GET http://{closed}/ HTTP/1.1\r\n\r\n"),
