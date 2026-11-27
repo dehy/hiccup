@@ -34,6 +34,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS
 ## Documentation
 
 - [Roadmap & milestones](ROADMAP.md)
+- [Installing the Hiccup CA](docs/ca.md)
 - [Architecture overview](docs/architecture.md)
 - [Architecture decision records](docs/adr/)
 - [Releasing](docs/releasing.md)

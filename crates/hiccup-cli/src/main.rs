@@ -2,8 +2,11 @@
 
 //! `hiccup`: the command-line interface to Hiccup.
 
+mod ca;
+
 use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -24,6 +27,11 @@ struct Cli {
     #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
 
+    /// Directory holding Hiccup's data, such as the CA. Defaults to the
+    /// per-user data directory (e.g. `~/.local/share/hiccup` on Linux).
+    #[arg(long, value_name = "DIR", env = "HICCUP_DATA_DIR", global = true)]
+    data_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -33,6 +41,9 @@ enum Command {
     /// Intercepting proxy.
     #[command(subcommand)]
     Proxy(ProxyCommand),
+    /// Local certificate authority for HTTPS interception.
+    #[command(subcommand)]
+    Ca(ca::CaCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,7 +71,20 @@ fn main() -> ExitCode {
     init_logging(cli.verbose);
     match cli.command {
         Command::Proxy(ProxyCommand::Start(args)) => proxy_start(args),
+        Command::Ca(command) => match data_dir(cli.data_dir) {
+            Some(dir) => ca::run(command, &dir),
+            None => ExitCode::FAILURE,
+        },
     }
+}
+
+/// `--data-dir`, `HICCUP_DATA_DIR`, or the per-user data directory.
+fn data_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    let dir = explicit.or_else(|| dirs::data_dir().map(|d| d.join("hiccup")));
+    if dir.is_none() {
+        eprintln!("hiccup: cannot determine the user data directory; use --data-dir");
+    }
+    dir
 }
 
 fn init_logging(verbose: u8) {
