@@ -158,6 +158,8 @@ impl Store {
         .open(path)?;
         // An existing project (restored, copied, or someone else's) keeps
         // its mode: tighten it too. Fails on a file we do not own.
+        // shortcut: in a directory others can write to, the file can still
+        // be swapped before SQLite opens it; see #53 before wiring in real traffic.
         #[cfg(unix)]
         restrict(path)?;
         let mut db = Connection::open(path)?;
