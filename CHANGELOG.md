@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- HTTPS interception in `CONNECT` tunnels.
+  - The client gets a certificate for the host (from SNI, else the `CONNECT` target; DNS name or IP), signed by the local CA and cached per host. ALPN is limited to `http/1.1`.
+  - Requests inside the tunnel are forwarded as received, over TLS, and recorded like plain ones (`Exchange::tls`). Upstream certificates are not verified yet (#11).
+  - `hiccup proxy start --tls-passthrough PATTERN` (`host`, `*.example.com` or `*`) relays matching hosts untouched, as are tunnels that do not carry TLS.
 - Local certificate authority for HTTPS interception: an ECDSA P-256 root CA, generated per installation on first use and stored in the per-user data directory with an owner-only private key.
   - `hiccup ca info` shows its location, validity and SHA-256 fingerprint.
   - `hiccup ca export [--format pem|der] [-o FILE]` exports the certificate.

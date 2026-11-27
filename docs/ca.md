@@ -4,10 +4,9 @@ To show and edit HTTPS traffic, Hiccup decrypts it with certificates signed by
 a certificate authority (CA) that is unique to your installation. Clients
 reject those certificates until you tell them to trust the Hiccup CA.
 
-> [!NOTE]
-> TLS interception is in progress
-> ([#10](https://github.com/dehy/hiccup/issues/10)). Until it lands, the proxy
-> passes HTTPS through without decrypting it, so the CA is not used yet.
+Hosts given with `hiccup proxy start --tls-passthrough PATTERN` are relayed
+without decryption. Use it for clients that pin certificates, which reject
+Hiccup's even with the CA installed.
 
 > [!WARNING]
 > Anyone who has Hiccup's CA private key (`ca-key.pem`) can impersonate any

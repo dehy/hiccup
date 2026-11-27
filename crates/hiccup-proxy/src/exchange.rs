@@ -30,6 +30,9 @@ pub struct Exchange {
     pub client: SocketAddr,
     /// The upstream `host:port`.
     pub upstream: String,
+    /// Whether the exchange was decrypted from an intercepted TLS tunnel
+    /// (`https`), rather than received as a plain proxy request (`http`).
+    pub tls: bool,
     /// The request exactly as received from the client.
     pub received: Request,
     /// The bytes forwarded upstream.
