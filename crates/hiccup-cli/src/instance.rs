@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use clap::Subcommand;
 use hiccup_control::api::method;
-use hiccup_control::{BoxFuture, Client, ClientError, Handler, InstanceRecord, Notifier};
+use hiccup_control::{BoxFuture, Client, ClientError, Handler, InstanceRecord};
 use hiccup_core::Instance;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -66,7 +66,7 @@ where
         let server = hiccup_control::serve(
             &mut registration,
             handler,
-            Notifier::default(),
+            instance.notifier(),
             stop_server.clone(),
         );
         let body = async {

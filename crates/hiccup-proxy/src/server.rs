@@ -36,6 +36,7 @@ pub struct Proxy {
     listeners: Vec<TcpListener>,
     config: ProxyConfig,
     observer: Option<ExchangeObserver>,
+    request_observer: Option<ExchangeObserver>,
     interceptor: Option<Interceptor>,
     intercept: Option<Arc<InterceptQueue>>,
 }
@@ -58,6 +59,7 @@ impl Proxy {
             listeners,
             config,
             observer: None,
+            request_observer: None,
             interceptor: None,
             intercept: None,
         })
@@ -67,6 +69,14 @@ impl Proxy {
     #[must_use]
     pub fn with_observer(mut self, observer: ExchangeObserver) -> Self {
         self.observer = Some(observer);
+        self
+    }
+
+    /// Calls `observer` with every exchange whose request has been read,
+    /// before it is held or forwarded.
+    #[must_use]
+    pub fn with_request_observer(mut self, observer: ExchangeObserver) -> Self {
+        self.request_observer = Some(observer);
         self
     }
 
@@ -112,6 +122,8 @@ impl Proxy {
         let ctx = Arc::new(Context {
             config: self.config,
             observer: self.observer,
+            request_observer: self.request_observer,
+            next_id: std::sync::atomic::AtomicU64::new(1),
             interceptor: self.interceptor,
             intercept: self.intercept,
             shutdown: shutdown.clone(),

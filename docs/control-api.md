@@ -350,6 +350,22 @@ Result:
 }
 ```
 
+### `events.subscribe`
+
+Receive events on this connection, as notifications, until it closes. Events are buffered: a subscriber that falls too far behind gets `events.lagged`, then the connection closes; reconnect and subscribe again (state such as held items can be listed afresh).
+
+Parameters:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{}
+```
+
 ### `scope.list`
 
 List the scope rules. They belong to the instance; intercept rules with `in_scope` use them.
@@ -468,10 +484,102 @@ Errors:
 
 ### `instance.stopping`
 
-The instance is stopping; the connection will close.
+The instance is stopping; the connection will close. Sent to every connection.
 
 Parameters:
 
 ```json
 {}
+```
+
+### `exchange.request`
+
+A request was received, before it is held or forwarded. Events from here on are sent after `events.subscribe` only.
+
+Parameters:
+
+```json
+{
+  "id": 12,
+  "method": "GET",
+  "target": "/api/items?page=2",
+  "tls": true,
+  "upstream": "example.com:443"
+}
+```
+
+### `exchange.response`
+
+An exchange completed (its response was relayed in full), or failed.
+
+Parameters:
+
+```json
+{
+  "duration_ms": 87,
+  "id": 12,
+  "size": 5321,
+  "status": 200
+}
+```
+
+### `intercept.pending`
+
+A message is held in the intercept queue (as in `intercept.list`).
+
+Parameters:
+
+```json
+{
+  "age_ms": 1500,
+  "direction": "request",
+  "id": 7,
+  "method": "POST",
+  "size": 412,
+  "target": "/api/login",
+  "tls": true,
+  "upstream": "example.com:443"
+}
+```
+
+### `intercept.resolved`
+
+A held message left the intercept queue.
+
+Parameters:
+
+```json
+{
+  "id": 7,
+  "outcome": "edited"
+}
+```
+
+### `proxy.state`
+
+The proxy started or stopped (as in `proxy.status`).
+
+Parameters:
+
+```json
+{
+  "exchanges": 42,
+  "listen": [
+    "127.0.0.1:8080"
+  ],
+  "running": true,
+  "verify_upstream": false
+}
+```
+
+### `events.lagged`
+
+The subscriber fell behind and missed events; the connection closes next.
+
+Parameters:
+
+```json
+{
+  "missed": 42
+}
 ```

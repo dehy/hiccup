@@ -46,12 +46,26 @@ pub mod method {
     pub const SCOPE_REMOVE: &str = "scope.remove";
     /// Tell whether a URL is in scope.
     pub const SCOPE_TEST: &str = "scope.test";
+    /// Receive events on this connection.
+    pub const EVENTS_SUBSCRIBE: &str = "events.subscribe";
 }
 
 /// Notification names.
 pub mod notification {
     /// The instance is about to stop.
     pub const INSTANCE_STOPPING: &str = "instance.stopping";
+    /// A request was received.
+    pub const EXCHANGE_REQUEST: &str = "exchange.request";
+    /// An exchange completed.
+    pub const EXCHANGE_RESPONSE: &str = "exchange.response";
+    /// A message is held in the intercept queue.
+    pub const INTERCEPT_PENDING: &str = "intercept.pending";
+    /// A held message left the intercept queue.
+    pub const INTERCEPT_RESOLVED: &str = "intercept.resolved";
+    /// The proxy started or stopped.
+    pub const PROXY_STATE: &str = "proxy.state";
+    /// The subscriber fell behind and missed events; the connection closes.
+    pub const EVENTS_LAGGED: &str = "events.lagged";
 }
 
 /// Result of `instance.info`.
@@ -319,6 +333,58 @@ pub struct ScopeTestResult {
     pub in_scope: bool,
 }
 
+/// `exchange.request`: a request was received, before it is held or
+/// forwarded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeRequestEvent {
+    /// Ties it to the `exchange.response` that follows.
+    pub id: u64,
+    /// The request method.
+    pub method: String,
+    /// The upstream `host:port`.
+    pub upstream: String,
+    /// Whether it was decrypted from an intercepted TLS tunnel.
+    pub tls: bool,
+    /// The request target, as received.
+    pub target: String,
+}
+
+/// `exchange.response`: an exchange completed, or failed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExchangeResponseEvent {
+    /// The `exchange.request` this completes.
+    pub id: u64,
+    /// The response status, if a response arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Size of the response, in bytes. A very large body counts only up to
+    /// the part Hiccup keeps of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// How long the exchange took, in milliseconds.
+    pub duration_ms: u64,
+    /// Why it failed, if it did (Hiccup answered the client with an error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `intercept.resolved`: a held message left the queue.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterceptResolvedEvent {
+    /// The held item's ID.
+    pub id: u64,
+    /// `"forwarded"`, `"edited"`, `"dropped"`, or `"abandoned"` (the
+    /// connection closed while it was held).
+    pub outcome: String,
+}
+
+/// `events.lagged`: the subscriber fell behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventsLagged {
+    /// How many events it missed.
+    pub missed: u64,
+}
+
 /// Documentation of one method or notification.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageDoc {
@@ -547,6 +613,16 @@ pub const METHODS: &[MessageDoc] = &[
         errors: &[],
     },
     MessageDoc {
+        name: method::EVENTS_SUBSCRIBE,
+        summary: "Receive events on this connection, as notifications, until it closes. \
+                  Events are buffered: a subscriber that falls too far behind gets \
+                  `events.lagged`, then the connection closes; reconnect and subscribe \
+                  again (state such as held items can be listed afresh).",
+        params: || json!({}),
+        result: || json!({}),
+        errors: &[],
+    },
+    MessageDoc {
         name: method::SCOPE_LIST,
         summary: "List the scope rules. They belong to the instance; intercept rules with \
                   `in_scope` use them.",
@@ -589,13 +665,80 @@ pub const METHODS: &[MessageDoc] = &[
 ];
 
 /// Every notification an instance sends.
-pub const NOTIFICATIONS: &[MessageDoc] = &[MessageDoc {
-    name: notification::INSTANCE_STOPPING,
-    summary: "The instance is stopping; the connection will close.",
-    params: || json!({}),
-    result: || Value::Null,
-    errors: &[],
-}];
+pub const NOTIFICATIONS: &[MessageDoc] = &[
+    MessageDoc {
+        name: notification::INSTANCE_STOPPING,
+        summary: "The instance is stopping; the connection will close. Sent to every \
+                  connection.",
+        params: || json!({}),
+        result: || Value::Null,
+        errors: &[],
+    },
+    MessageDoc {
+        name: notification::EXCHANGE_REQUEST,
+        summary: "A request was received, before it is held or forwarded. Events from here \
+                  on are sent after `events.subscribe` only.",
+        params: || {
+            to_value(&ExchangeRequestEvent {
+                id: 12,
+                method: "GET".to_owned(),
+                upstream: "example.com:443".to_owned(),
+                tls: true,
+                target: "/api/items?page=2".to_owned(),
+            })
+        },
+        result: || Value::Null,
+        errors: &[],
+    },
+    MessageDoc {
+        name: notification::EXCHANGE_RESPONSE,
+        summary: "An exchange completed (its response was relayed in full), or failed.",
+        params: || {
+            to_value(&ExchangeResponseEvent {
+                id: 12,
+                status: Some(200),
+                size: Some(5321),
+                duration_ms: 87,
+                error: None,
+            })
+        },
+        result: || Value::Null,
+        errors: &[],
+    },
+    MessageDoc {
+        name: notification::INTERCEPT_PENDING,
+        summary: "A message is held in the intercept queue (as in `intercept.list`).",
+        params: || to_value(&example_summary()),
+        result: || Value::Null,
+        errors: &[],
+    },
+    MessageDoc {
+        name: notification::INTERCEPT_RESOLVED,
+        summary: "A held message left the intercept queue.",
+        params: || {
+            to_value(&InterceptResolvedEvent {
+                id: 7,
+                outcome: "edited".to_owned(),
+            })
+        },
+        result: || Value::Null,
+        errors: &[],
+    },
+    MessageDoc {
+        name: notification::PROXY_STATE,
+        summary: "The proxy started or stopped (as in `proxy.status`).",
+        params: || to_value(&example_status()),
+        result: || Value::Null,
+        errors: &[],
+    },
+    MessageDoc {
+        name: notification::EVENTS_LAGGED,
+        summary: "The subscriber fell behind and missed events; the connection closes next.",
+        params: || to_value(&EventsLagged { missed: 42 }),
+        result: || Value::Null,
+        errors: &[],
+    },
+];
 
 /// Renders the API reference (Markdown).
 #[must_use]

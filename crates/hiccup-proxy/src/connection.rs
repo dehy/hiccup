@@ -30,6 +30,8 @@ const READ_CHUNK: usize = 16 * 1024;
 pub(crate) struct Context {
     pub(crate) config: ProxyConfig,
     pub(crate) observer: Option<ExchangeObserver>,
+    pub(crate) request_observer: Option<ExchangeObserver>,
+    pub(crate) next_id: std::sync::atomic::AtomicU64,
     pub(crate) interceptor: Option<Interceptor>,
     pub(crate) intercept: Option<Arc<InterceptQueue>>,
     pub(crate) shutdown: CancellationToken,
@@ -339,6 +341,9 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     };
 
     let mut exchange = Exchange {
+        id: ctx
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         started: std::time::SystemTime::now(),
         duration: std::time::Duration::ZERO,
         client: peer,
@@ -360,6 +365,9 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         "request"
     );
 
+    if let Some(observer) = &ctx.request_observer {
+        observer(&exchange);
+    }
     let method_name = String::from_utf8_lossy(exchange.received.head().method()).into_owned();
     let rule_input = RequestInfo {
         method: &method_name,

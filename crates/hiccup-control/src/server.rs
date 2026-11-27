@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::api::notification;
+use crate::api::{method, notification};
 use crate::protocol::{ErrorCode, MAX_MESSAGE_LEN, Request, Response, RpcError};
 use crate::registry::Registration;
 
@@ -44,7 +44,8 @@ impl Notifier {
 
 impl Default for Notifier {
     fn default() -> Self {
-        Self(broadcast::channel(256).0)
+        // Room for a page of a browser's requests and responses at once.
+        Self(broadcast::channel(1024).0)
     }
 }
 
@@ -70,10 +71,10 @@ pub async fn serve(
             accepted = listener.accept() => {
                 match accepted {
                     Ok(stream) => {
-                        let (handler, notifications, shutdown) =
-                            (handler.clone(), notifier.0.subscribe(), shutdown.clone());
+                        let (handler, notifier, shutdown) =
+                            (handler.clone(), notifier.clone(), shutdown.clone());
                         clients.spawn(async move {
-                            if let Err(e) = client(stream, handler, notifications, shutdown).await {
+                            if let Err(e) = client(stream, handler, notifier, shutdown).await {
                                 debug!(error = %e, "control client error");
                             }
                         });
@@ -95,9 +96,11 @@ pub async fn serve(
 async fn client<S: AsyncRead + AsyncWrite + Send>(
     stream: S,
     handler: Arc<dyn Handler>,
-    mut notifications: broadcast::Receiver<Request>,
+    notifier: Notifier,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
+    // Events flow only after `events.subscribe`: one-shot commands get none.
+    let mut events: Option<broadcast::Receiver<Request>> = None;
     let (reader, mut writer) = tokio::io::split(stream);
     // `read_until` keeps what it read in `line` when another branch wins, so
     // the buffer is only cleared once a line is complete.
@@ -110,13 +113,21 @@ async fn client<S: AsyncRead + AsyncWrite + Send>(
                 let _ = send(&mut writer, &stopping).await;
                 return Ok(());
             }
-            n = notifications.recv() => {
+            n = async { events.as_mut().expect("subscribed").recv().await }, if events.is_some() => {
                 match n {
                     Ok(n) => send(&mut writer, &n).await?,
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        debug!(missed, "control client missed notifications");
+                        // Bounded buffers: a slow subscriber is dropped, and
+                        // told so, rather than slowing everyone.
+                        debug!(missed, "control client fell behind; dropping it");
+                        let lagged = Request::notification(
+                            notification::EVENTS_LAGGED,
+                            serde_json::json!({ "missed": missed }),
+                        );
+                        let _ = send(&mut writer, &lagged).await;
+                        return Ok(());
                     }
-                    Err(broadcast::error::RecvError::Closed) => {}
+                    Err(broadcast::error::RecvError::Closed) => events = None,
                 }
             }
             read = reader.read_until(b'\n', &mut line) => {
@@ -130,7 +141,14 @@ async fn client<S: AsyncRead + AsyncWrite + Send>(
                 if line.last() != Some(&b'\n') {
                     continue; // Partial line: the limit is checked at EOF.
                 }
-                if let Some(response) = dispatch(&line, handler.as_ref()).await {
+                let response = match subscribe(&line) {
+                    Some(id) => {
+                        events.get_or_insert_with(|| notifier.0.subscribe());
+                        id.map(|id| Response::ok(id, serde_json::json!({})))
+                    }
+                    None => dispatch(&line, handler.as_ref()).await,
+                };
+                if let Some(response) = response {
                     send(&mut writer, &response).await?;
                 }
                 line.clear();
@@ -141,6 +159,15 @@ async fn client<S: AsyncRead + AsyncWrite + Send>(
 }
 
 /// Handles one line. Notifications from the client get no response.
+/// If `line` calls `events.subscribe`, which the server handles itself: its
+/// ID, if it has one.
+fn subscribe(line: &[u8]) -> Option<Option<Value>> {
+    serde_json::from_slice::<Request>(line)
+        .ok()
+        .filter(|r| r.jsonrpc == "2.0" && r.method == method::EVENTS_SUBSCRIBE)
+        .map(|r| r.id)
+}
+
 async fn dispatch(line: &[u8], handler: &dyn Handler) -> Option<Response> {
     if line.iter().all(u8::is_ascii_whitespace) {
         return None;

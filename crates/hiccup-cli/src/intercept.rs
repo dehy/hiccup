@@ -482,7 +482,7 @@ fn introduces_bare_lf(original: &[u8], edited: &[u8]) -> bool {
 /// Text safe to print to a terminal: control characters other than tab, LF
 /// and CRLF, and invalid UTF-8, are shown as `\xNN` or `\u{NN}`. A bare CR
 /// is escaped too: it would let the message overwrite what is printed.
-fn escape(bytes: &[u8]) -> String {
+pub(crate) fn escape(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len());
     for chunk in bytes.utf8_chunks() {

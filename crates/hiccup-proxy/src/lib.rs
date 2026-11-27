@@ -34,8 +34,8 @@ pub use ca::{CaError, CaInfo, CertificateAuthority};
 pub use config::ProxyConfig;
 pub use exchange::{Exchange, ExchangeObserver, Modification};
 pub use intercept::{
-    Direction, InterceptError, InterceptQueue, InterceptRules, InterceptSettings, Pending,
-    TimeoutAction, Verdict,
+    Direction, InterceptError, InterceptQueue, InterceptRules, InterceptSettings, Outcome, Pending,
+    QueueEvent, QueueListener, TimeoutAction, Verdict,
 };
 pub use scope::{Scheme, Scope, ScopeRule, ScopeTarget};
 pub use server::Proxy;

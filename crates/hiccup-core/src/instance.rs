@@ -8,14 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hiccup_control::api::{
-    ForwardAllResult, ForwardParams, InstanceInfo, InterceptSettingsParams, InterceptStatus,
-    ItemParams, PendingItem, PendingSummary, ProxyStartParams, ProxyStartResult, ProxyStatus,
-    ScopeRemoveParams, ScopeRuleParams, ScopeRules, ScopeTestParams, ScopeTestResult, method,
+    ExchangeRequestEvent, ExchangeResponseEvent, ForwardAllResult, ForwardParams, InstanceInfo,
+    InterceptResolvedEvent, InterceptSettingsParams, InterceptStatus, ItemParams, PendingItem,
+    PendingSummary, ProxyStartParams, ProxyStartResult, ProxyStatus, ScopeRemoveParams,
+    ScopeRuleParams, ScopeRules, ScopeTestParams, ScopeTestResult, method, notification,
 };
-use hiccup_control::{API_VERSION, BoxFuture, ErrorCode, Handler, RpcError};
+use hiccup_control::{API_VERSION, BoxFuture, ErrorCode, Handler, Notifier, RpcError};
 use hiccup_proxy::{
     AbsoluteTarget, CertificateAuthority, Direction, Exchange, InterceptError, InterceptQueue,
-    Pending, Proxy, Scheme, Scope, ScopeTarget, Verdict,
+    Outcome, Pending, Proxy, QueueEvent, Scheme, Scope, ScopeTarget, Verdict,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -35,6 +36,8 @@ pub struct Instance {
     proxy_running: watch::Sender<bool>,
     /// Outlives proxy restarts: its settings belong to the instance.
     intercept: Arc<InterceptQueue>,
+    /// Events for connections that called `events.subscribe`.
+    notifier: Notifier,
 }
 
 struct RunningProxy {
@@ -60,6 +63,26 @@ impl Instance {
     /// An instance named `name`, keeping its data (the CA) in `data_dir`.
     #[must_use]
     pub fn new(name: impl Into<String>, data_dir: impl Into<PathBuf>) -> Arc<Self> {
+        let notifier = Notifier::default();
+        let events = notifier.clone();
+        let intercept = InterceptQueue::with_listener(Arc::new(move |e: QueueEvent<'_>| match e {
+            QueueEvent::Held(item) => {
+                events.notify(notification::INTERCEPT_PENDING, value(&summary(item)));
+            }
+            QueueEvent::Resolved { id, outcome } => {
+                let outcome = match outcome {
+                    Outcome::Forwarded => "forwarded",
+                    Outcome::Edited => "edited",
+                    Outcome::Dropped => "dropped",
+                    Outcome::Abandoned => "abandoned",
+                };
+                let event = InterceptResolvedEvent {
+                    id,
+                    outcome: outcome.to_owned(),
+                };
+                events.notify(notification::INTERCEPT_RESOLVED, value(&event));
+            }
+        }));
         Arc::new(Self {
             name: name.into(),
             data_dir: data_dir.into(),
@@ -69,8 +92,16 @@ impl Instance {
             shutdown: CancellationToken::new(),
             proxy: Mutex::new(None),
             proxy_running: watch::channel(false).0,
-            intercept: InterceptQueue::new(),
+            intercept,
+            notifier,
         })
+    }
+
+    /// The events this instance sends to connections that called
+    /// `events.subscribe`: give it to [`hiccup_control::serve`].
+    #[must_use]
+    pub fn notifier(&self) -> Notifier {
+        self.notifier.clone()
     }
 
     /// Cancelled when the instance is asked to stop (`instance.shutdown`).
@@ -128,12 +159,17 @@ impl Instance {
             .join(":");
         let exchanges = Arc::new(AtomicU64::new(0));
         let counter = exchanges.clone();
+        let (on_request, on_response) = (self.notifier.clone(), self.notifier.clone());
         let proxy = Proxy::bind(config)
             .await
             .map_err(|e| failed(e.to_string()))?
             .with_intercept(self.intercept.clone())
-            .with_observer(Arc::new(move |_: &Exchange| {
+            .with_observer(Arc::new(move |e: &Exchange| {
                 counter.fetch_add(1, Ordering::Relaxed);
+                on_response.notify(notification::EXCHANGE_RESPONSE, value(&response_event(e)));
+            }))
+            .with_request_observer(Arc::new(move |e: &Exchange| {
+                on_request.notify(notification::EXCHANGE_REQUEST, value(&request_event(e)));
             }))
             .intercept_tls(Arc::new(ca))
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
@@ -162,6 +198,8 @@ impl Instance {
             ca_sha256,
         };
         *slot = Some(proxy);
+        self.notifier
+            .notify(notification::PROXY_STATE, value(&result.proxy));
         Ok(result)
     }
 
@@ -181,6 +219,8 @@ impl Instance {
         proxy.stop.cancel();
         let _ = proxy.task.await;
         self.proxy_running.send_replace(false);
+        self.notifier
+            .notify(notification::PROXY_STATE, value(&ProxyStatus::default()));
         Ok(ProxyStatus::default())
     }
 
@@ -363,6 +403,31 @@ fn not_found(id: u64) -> RpcError {
         ErrorCode::InvalidState,
         format!("no held item {id} (it may have been resolved or timed out)"),
     )
+}
+
+fn value<T: Serialize>(event: &T) -> Value {
+    serde_json::to_value(event).expect("API types serialize")
+}
+
+fn request_event(e: &Exchange) -> ExchangeRequestEvent {
+    let head = e.received.head();
+    ExchangeRequestEvent {
+        id: e.id,
+        method: String::from_utf8_lossy(head.method()).into_owned(),
+        upstream: e.upstream.clone(),
+        tls: e.tls,
+        target: String::from_utf8_lossy(head.target()).into_owned(),
+    }
+}
+
+fn response_event(e: &Exchange) -> ExchangeResponseEvent {
+    ExchangeResponseEvent {
+        id: e.id,
+        status: e.response.as_ref().and_then(|r| r.head().status_code()),
+        size: e.response.as_ref().map(|r| r.len() as u64),
+        duration_ms: u64::try_from(e.duration.as_millis()).unwrap_or(u64::MAX),
+        error: e.error.clone(),
+    }
 }
 
 fn summary(item: &Pending) -> PendingSummary {
