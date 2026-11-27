@@ -158,6 +158,38 @@ fn a_new_project_is_private() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn an_existing_project_is_made_private() {
+    use std::fs::{Permissions, metadata, set_permissions, write};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mode = |name: &str| {
+        metadata(dir.path().join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    // A restored project with a stale -wal, both world-readable.
+    let path = dir.path().join("p.hiccup");
+    drop(Store::open(&path).unwrap());
+    write(dir.path().join("p.hiccup-wal"), b"").unwrap();
+    for name in ["p.hiccup", "p.hiccup-wal"] {
+        set_permissions(dir.path().join(name), Permissions::from_mode(0o644)).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!((mode("p.hiccup"), mode("p.hiccup-wal")), (0o600, 0o600));
+    drop(store);
+
+    // A symlink: its target is tightened.
+    set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+    let link = dir.path().join("link.hiccup");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    drop(Store::open(&link).unwrap());
+    assert_eq!(mode("p.hiccup"), 0o600);
+}
+
 #[cfg(windows)]
 #[test]
 fn a_new_project_is_private() {
@@ -176,7 +208,7 @@ fn a_new_project_is_private() {
         // owner, SYSTEM and administrators may remain (the token's default).
         // Names are localized: these checks are meaningful on English Windows.
         assert!(!acl.contains("(I)"), "{file}: {acl}");
-        // `BUILTIN\\Users:`, `NT AUTHORITY\\Authenticated Users:`, `Everyone:`.
+        // `BUILTIN\Users:`, `NT AUTHORITY\Authenticated Users:`, `Everyone:`.
         for group in ["Users:", "Everyone:"] {
             assert!(!acl.contains(group), "{file}: {acl}");
         }

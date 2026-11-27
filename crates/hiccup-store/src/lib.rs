@@ -156,6 +156,10 @@ impl Store {
             0o600,
         )
         .open(path)?;
+        // An existing project (restored, copied, or someone else's) keeps
+        // its mode: tighten it too. Fails on a file we do not own.
+        #[cfg(unix)]
+        restrict(path)?;
         let mut db = Connection::open(path)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         // With WAL, NORMAL survives application crashes; only a power loss
@@ -353,6 +357,21 @@ fn migrate(db: &mut Connection) -> Result<(), StoreError> {
         tx.pragma_update(None, "user_version", applied + 1)?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+/// Makes the project and any leftover -wal / -shm files `0600`.
+#[cfg(unix)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        match std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !suffix.is_empty() => {}
+            result => result?,
+        }
+    }
     Ok(())
 }
 
