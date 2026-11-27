@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Intercept queue. Matching requests and responses are held until they are forwarded, forwarded edited (the bytes are sent exactly as edited), or dropped. After an edited request, the upstream connection is not reused.
+  - Rules per direction match the request's host patterns, methods and a path regex.
+  - An optional timeout forwards or drops whatever nobody acts on.
+  - Exchanges record `RequestEdited` and `ResponseEdited`, and an edited response's bytes are kept in `Exchange::delivered`.
+  - Control API: `intercept.status`, `intercept.set`, `intercept.list`, `intercept.show`, `intercept.forward`, `intercept.drop` and `intercept.forward_all`.
+  - CLI: `hiccup intercept on|off|status|list|show|forward|drop|edit`. `edit` takes `--file`, standard input, or `$VISUAL`/`$EDITOR`.
+  - On a terminal, `show` and `list` escape control characters; redirected, `show` writes the exact bytes.
 - Control plane (ADR 0004): every running Hiccup is an instance that other `hiccup` commands control.
   - `hiccup-control`: JSON-RPC 2.0 over a Unix socket (`0600`, in a `0700` directory) or a Windows named pipe restricted to its owner, with server-push notifications and a per-user instance registry. The API reference (`docs/control-api.md`) is generated from the code.
   - `hiccup serve` runs a headless instance. `hiccup proxy start|stop|status` and `hiccup instance list|stop` control it. `proxy start --foreground` is an instance too.

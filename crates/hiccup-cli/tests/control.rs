@@ -3,80 +3,13 @@
 //! End-to-end checks of the control plane: `hiccup serve`, then other
 //! `hiccup` processes controlling it (ADR 0004).
 
-use std::io::{BufRead, BufReader, Read, Write};
+mod common;
+
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, ChildStderr, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use serde_json::Value;
-
-struct Env {
-    dir: tempfile::TempDir,
-}
-
-impl Env {
-    fn new() -> Self {
-        Self {
-            dir: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hiccup"));
-        cmd.arg("--data-dir")
-            .arg(self.dir.path().join("data"))
-            .arg("--runtime-dir")
-            .arg(self.dir.path().join("run"))
-            .env_remove("HICCUP_DATA_DIR")
-            .env_remove("HICCUP_RUNTIME_DIR")
-            .env_remove("HICCUP_INSTANCE");
-        cmd
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().unwrap()
-    }
-
-    fn json(&self, args: &[&str]) -> Value {
-        let out = self.command().arg("--json").args(args).output().unwrap();
-        assert!(out.status.success(), "{args:?}: {out:?}");
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-
-    /// Spawns a long-running command and waits until stderr has a line
-    /// containing `ready`.
-    #[allow(clippy::zombie_processes)] // The caller waits for the returned child.
-    fn spawn(&self, args: &[&str], ready: &str) -> (Child, BufReader<ChildStderr>) {
-        let mut child = self
-            .command()
-            .args(args)
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut stderr = BufReader::new(child.stderr.take().unwrap());
-        loop {
-            let mut line = String::new();
-            if stderr.read_line(&mut line).unwrap() == 0 {
-                let status = child.wait();
-                panic!("{args:?} exited: {status:?}");
-            }
-            if line.contains(ready) {
-                return (child, stderr);
-            }
-        }
-    }
-}
-
-fn wait_exit(child: &mut Child) -> std::process::ExitStatus {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        assert!(Instant::now() < deadline, "the instance did not exit");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
+use common::{Env, wait_exit};
 
 /// A one-shot origin server.
 fn origin() -> std::net::SocketAddr {

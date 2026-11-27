@@ -12,6 +12,8 @@
 //!   CA, and requests inside the tunnel are proxied like plain ones. Hosts
 //!   in [`ProxyConfig::tls_passthrough`], and tunnels that do not carry TLS,
 //!   are relayed untouched.
+//! - An [`InterceptQueue`] holds matching requests and responses until they
+//!   are forwarded (possibly edited) or dropped.
 //! - Every completed [`Exchange`] is reported to an optional observer.
 //! - A local [`CertificateAuthority`] for TLS interception.
 
@@ -20,6 +22,7 @@ pub mod ca;
 mod config;
 mod connection;
 mod exchange;
+mod intercept;
 mod io;
 mod server;
 mod target;
@@ -29,6 +32,10 @@ mod upstream;
 pub use ca::{CaError, CaInfo, CertificateAuthority};
 pub use config::ProxyConfig;
 pub use exchange::{Exchange, ExchangeObserver, Modification};
+pub use intercept::{
+    Direction, InterceptError, InterceptQueue, InterceptRules, InterceptSettings, Pending,
+    TimeoutAction, Verdict,
+};
 pub use server::Proxy;
 pub use target::{AbsoluteTarget, Authority, HostPattern, TargetError};
 pub use upstream::{ClientCert, TlsVersion, UpstreamConfig};

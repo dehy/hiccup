@@ -21,6 +21,12 @@ pub enum Modification {
         /// The target as forwarded, e.g. `/a`.
         rewritten: Bytes,
     },
+    /// The user edited the request in the intercept queue: `forwarded` holds
+    /// the edited bytes.
+    RequestEdited,
+    /// The user edited the response in the intercept queue:
+    /// [`Exchange::delivered`] holds the bytes sent to the client.
+    ResponseEdited,
 }
 
 /// One request and its response, as seen by the proxy.
@@ -41,8 +47,12 @@ pub struct Exchange {
     pub modifications: Vec<Modification>,
     /// Interim (1xx) responses relayed before the final response.
     pub interim: Vec<Response>,
-    /// The final response, or `None` if the exchange failed.
+    /// The final response as received from upstream, or `None` if the
+    /// exchange failed before one arrived.
     pub response: Option<Response>,
+    /// The bytes sent to the client instead of `response`, when the user
+    /// edited it.
+    pub delivered: Option<Bytes>,
     /// Why the exchange failed, if it did. Hiccup then answered the client
     /// with an error response of its own.
     pub error: Option<String>,

@@ -23,11 +23,13 @@ hiccup-proxy = { path = "crates/hiccup-proxy" }
 # External crates
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
+data-encoding = "2"
 dirs = "7"
 # Windows only (named pipes with a DACL). Single maintainer: pinned exactly,
 # updated deliberately. Unix uses tokio's UnixListener.
 interprocess = { version = "=2.4.8", features = ["tokio"] }
 proptest = "1"
+regex = "1"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 ring = "0.17"
 rustls-platform-verifier = "0.7"
