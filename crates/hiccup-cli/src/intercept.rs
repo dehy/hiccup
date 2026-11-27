@@ -399,7 +399,7 @@ fn edit(args: &EditArgs, globals: &Globals) -> ExitCode {
         let Some((_, original)) = fetch(globals, args.id) else {
             return ExitCode::FAILURE;
         };
-        match edit_in_editor(&original) {
+        match edit_in_editor(&original, &editor()) {
             Ok(bytes) if bytes == original => {
                 eprintln!("Unchanged: forwarding the original message.");
                 let params = ForwardParams {
@@ -416,7 +416,12 @@ fn edit(args: &EditArgs, globals: &Globals) -> ExitCode {
                 );
             }
             Ok(bytes) => {
-                warn_line_endings(&original, &bytes);
+                if introduces_bare_lf(&original, &bytes) {
+                    eprintln!(
+                        "Note: the edited head has bare LF line endings (the original used \
+                         CRLF). They are sent as is."
+                    );
+                }
                 bytes
             }
             Err(e) => {
@@ -443,11 +448,16 @@ fn edit(args: &EditArgs, globals: &Globals) -> ExitCode {
     )
 }
 
-/// Opens `$VISUAL` or `$EDITOR` on a private temporary copy of `original`.
-fn edit_in_editor(original: &[u8]) -> Result<Vec<u8>, String> {
-    let editor = std::env::var("VISUAL")
+/// `$VISUAL`, else `$EDITOR`, else the platform's default editor.
+fn editor() -> String {
+    std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_owned());
+        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_owned())
+}
+
+/// Opens `editor` (a program and its arguments) on a private temporary copy
+/// of `original`, and returns what it saved.
+fn edit_in_editor(original: &[u8], editor: &str) -> Result<Vec<u8>, String> {
     let mut words = editor.split_whitespace();
     let program = words.next().ok_or("$EDITOR is empty")?;
     // Created readable by the user only: messages can hold credentials.
@@ -470,9 +480,10 @@ fn edit_in_editor(original: &[u8]) -> Result<Vec<u8>, String> {
     std::fs::read(file.path()).map_err(|e| format!("cannot read the edited file: {e}"))
 }
 
-/// Editors often turn CRLF into LF; the bytes are still sent exactly, but
-/// servers may reject them.
-fn warn_line_endings(original: &[u8], edited: &[u8]) {
+/// Whether the edit turned the head's CRLF line endings into bare LF, as
+/// editors often do. The bytes are still sent exactly, but servers may
+/// reject them.
+fn introduces_bare_lf(original: &[u8], edited: &[u8]) -> bool {
     let head = |b: &[u8]| {
         let end = b
             .windows(4)
@@ -486,12 +497,7 @@ fn warn_line_endings(original: &[u8], edited: &[u8]) {
             .enumerate()
             .any(|(i, &c)| c == b'\n' && (i == 0 || b[i - 1] != b'\r'))
     };
-    if !bare_lf(&head(original)) && bare_lf(&head(edited)) {
-        eprintln!(
-            "Note: the edited head has bare LF line endings (the original used CRLF). They are \
-             sent as is."
-        );
-    }
+    !bare_lf(&head(original)) && bare_lf(&head(edited))
 }
 
 /// Text safe to print to a terminal: control characters other than tab, LF
@@ -521,7 +527,38 @@ fn escape(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use super::{escape, introduces_bare_lf};
+
+    #[test]
+    fn bare_lf_is_noticed_in_the_head_only() {
+        let crlf = b"GET / HTTP/1.1\r\nA: b\r\n\r\nbody\n";
+        assert!(!introduces_bare_lf(crlf, crlf));
+        assert!(introduces_bare_lf(crlf, b"GET / HTTP/1.1\nA: b\n\n"));
+        assert!(!introduces_bare_lf(b"GET /\nA: b\n\n", b"GET /x\nA: b\n\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_editor_edits_a_temporary_copy() {
+        use super::edit_in_editor;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("editor");
+        // Arguments are passed through; the file comes last.
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s' \"$1\" >> \"$2\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let editor = format!("{} -edited", script.display());
+        assert_eq!(
+            edit_in_editor(b"GET / HTTP/1.1\r\n\r\n", &editor).unwrap(),
+            b"GET / HTTP/1.1\r\n\r\n-edited"
+        );
+
+        let err = edit_in_editor(b"x", "false").unwrap_err();
+        assert!(err.starts_with("false exited with"), "{err}");
+        let err = edit_in_editor(b"x", "/nonexistent/editor").unwrap_err();
+        assert!(err.starts_with("cannot run /nonexistent/editor"), "{err}");
+        assert_eq!(edit_in_editor(b"x", " ").unwrap_err(), "$EDITOR is empty");
+    }
 
     #[test]
     fn escape_neutralises_terminal_controls() {

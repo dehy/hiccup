@@ -55,6 +55,13 @@ fn send(proxy: &str, origin: SocketAddr, path: &str) -> JoinHandle<Vec<u8>> {
     })
 }
 
+/// Runs a command that must succeed; returns its standard output.
+fn stdout(env: &Env, args: &[&str]) -> String {
+    let out = env.run(args);
+    assert!(out.status.success(), "{args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
 /// Waits until one message is held and returns its summary.
 fn held(env: &Env) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -93,6 +100,25 @@ fn a_scripted_intercept_session() {
     assert_eq!(item["target"], "/held/1");
     let raw = env.run(&["intercept", "show", &id, "--raw"]).stdout;
     assert!(raw.starts_with(b"GET /held/1 HTTP/1.1\r\n"), "{raw:?}");
+
+    // The same, for humans.
+    let text = stdout(&env, &["intercept", "status"]);
+    assert!(
+        text.contains("Requests:  on (methods GET; path /^/held/)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Responses: off") && text.contains("Held:      1"),
+        "{text}"
+    );
+    let text = stdout(&env, &["intercept", "list"]);
+    assert!(text.contains("  request   GET  "), "{text}");
+    assert!(text.contains(&format!("http://{origin}/held/1")), "{text}");
+    let text = stdout(&env, &["intercept", "show", &id]);
+    assert!(
+        text.starts_with(&format!("# {id} request GET {origin}/held/1 (")),
+        "{text}"
+    );
 
     let edited =
         b"GET /edited  HTTP/1.1\r\nhost: changed\r\nX-Edit: yes\r\nConnection: close\r\n\r\n";
@@ -137,11 +163,20 @@ fn a_scripted_intercept_session() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no held item 999"));
 
+    // Forwarding everything.
+    let client = send(&proxy, origin, "/held/5");
+    held(&env);
+    let text = stdout(&env, &["intercept", "forward", "--all"]);
+    assert_eq!(text, "Forwarded 1 message(s).\n");
+    assert!(client.join().unwrap().ends_with(b"origin"));
+    assert!(received.recv().unwrap().starts_with(b"GET /held/5 "));
+    assert_eq!(stdout(&env, &["intercept", "list"]), "No held message.\n");
+
     // Turning interception off forwards what is held.
     let client = send(&proxy, origin, "/held/4");
     held(&env);
-    let status = env.json(&["intercept", "off"]);
-    assert_eq!(status["requests"], Value::Null);
+    let text = stdout(&env, &["intercept", "off"]);
+    assert!(text.contains("Requests:  off"), "{text}");
     assert!(client.join().unwrap().ends_with(b"origin"));
     assert!(received.recv().unwrap().starts_with(b"GET /held/4 "));
 
@@ -168,6 +203,10 @@ fn responses_can_be_held_with_a_timeout() {
     ]);
     assert_eq!(status["requests"], Value::Null);
     assert_eq!(status["timeout_ms"], 300);
+    let text = stdout(&env, &["intercept", "status"]);
+    assert!(text.contains("Timeout:   0.3s, then drop"), "{text}");
+    let out = env.run(&["intercept", "on", "--timeout", "-1"]);
+    assert_eq!(out.status.code(), Some(2));
 
     // Nobody acts: the held response is dropped after the timeout.
     let response = send(&proxy, origin, "/").join().unwrap();

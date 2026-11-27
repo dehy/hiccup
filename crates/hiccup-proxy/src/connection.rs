@@ -253,8 +253,9 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         method: &method_name,
         target: &path,
     };
+    let (upstream_name, tls) = (exchange.upstream.clone(), exchange.tls);
     let pending = |direction, raw: Bytes, status| {
-        let (upstream, tls) = (exchange.upstream.clone(), exchange.tls);
+        let upstream = upstream_name.clone();
         let (method, target) = (method_name.clone(), path.clone());
         move |id| Pending {
             id,
@@ -292,76 +293,19 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
             || exchange.received.head().method().to_vec(),
             |r| r.head().method().to_vec(),
         );
-    let retry_allowed = is_idempotent(&method);
-    let mut attempt = 0;
-    let response = loop {
-        attempt += 1;
-        let reused = upstream.as_ref().is_some_and(|u| u.authority == authority);
-        if !reused {
-            match open_upstream(&authority, mode, ctx).await {
-                Ok(stream) => {
-                    *upstream = Some(Upstream {
-                        authority: authority.clone(),
-                        stream,
-                        buf: BytesMut::with_capacity(READ_CHUNK),
-                    });
-                }
-                Err(detail) => {
-                    return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
-                }
-            }
-        }
-        let up = upstream.as_mut().expect("upstream is connected");
-
-        let result: io::Result<Option<Response>> = async {
-            up.stream.write_all(&exchange.forwarded).await?;
-            loop {
-                let Some(response) =
-                    read_response(up, &method, &ctx.config.limits, ctx.config.read_timeout).await?
-                else {
-                    return Ok(None);
-                };
-                match response.head().status_code() {
-                    Some(100..=199) if response.framing().framing != Framing::Tunnel => {
-                        client.write_all(response.head().as_bytes()).await?;
-                        client.write_all(response.body()).await?;
-                        exchange.interim.push(response);
-                    }
-                    // The final response is written below, after interception.
-                    _ => return Ok(Some(response)),
-                }
-            }
-        }
-        .await;
-
-        match result {
-            Ok(Some(response)) => break response,
-            // A reused connection closed while idle: retry once on a new one.
-            Ok(None) if reused && retry_allowed && attempt == 1 && exchange.interim.is_empty() => {
-                debug!("reused upstream connection was closed; retrying");
-                *upstream = None;
-            }
-            Err(ref e)
-                if reused
-                    && retry_allowed
-                    && attempt == 1
-                    && exchange.interim.is_empty()
-                    && is_closed_connection(e) =>
-            {
-                debug!(error = %e, "reused upstream connection failed; retrying");
-                *upstream = None;
-            }
-            Ok(None) => {
-                *upstream = None;
-                let detail = format!("{} closed the connection without a response", authority);
-                return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
-            }
-            Err(e) => {
-                *upstream = None;
-                let detail = format!("error talking to {authority}: {e}");
-                return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
-            }
-        }
+    let response = match round_trip(
+        client,
+        &mut exchange,
+        &method,
+        &authority,
+        mode,
+        upstream,
+        ctx,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(detail) => return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await,
     };
 
     let framing = response.framing().framing;
@@ -432,6 +376,90 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     } else {
         Next::Close
     })
+}
+
+/// Sends the request upstream, on the open connection to `authority` if
+/// there is one, and reads the final response. Interim (1xx) responses are
+/// relayed to the client as they come. Retries once on a new connection if
+/// a reused one turns out to be closed. Errors are the 502's detail.
+async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut S,
+    exchange: &mut Exchange,
+    method: &[u8],
+    authority: &Authority,
+    mode: &Mode,
+    upstream: &mut Option<Upstream>,
+    ctx: &Context,
+) -> Result<Response, String> {
+    let retry_allowed = is_idempotent(method);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let reused = upstream.as_ref().is_some_and(|u| u.authority == *authority);
+        if !reused {
+            match open_upstream(authority, mode, ctx).await {
+                Ok(stream) => {
+                    *upstream = Some(Upstream {
+                        authority: authority.clone(),
+                        stream,
+                        buf: BytesMut::with_capacity(READ_CHUNK),
+                    });
+                }
+                Err(detail) => return Err(detail),
+            }
+        }
+        let up = upstream.as_mut().expect("upstream is connected");
+
+        let result: io::Result<Option<Response>> = async {
+            up.stream.write_all(&exchange.forwarded).await?;
+            loop {
+                let Some(response) =
+                    read_response(up, method, &ctx.config.limits, ctx.config.read_timeout).await?
+                else {
+                    return Ok(None);
+                };
+                match response.head().status_code() {
+                    Some(100..=199) if response.framing().framing != Framing::Tunnel => {
+                        client.write_all(response.head().as_bytes()).await?;
+                        client.write_all(response.body()).await?;
+                        exchange.interim.push(response);
+                    }
+                    // The final response is written below, after interception.
+                    _ => return Ok(Some(response)),
+                }
+            }
+        }
+        .await;
+
+        match result {
+            Ok(Some(response)) => return Ok(response),
+            // A reused connection closed while idle: retry once on a new one.
+            Ok(None) if reused && retry_allowed && attempt == 1 && exchange.interim.is_empty() => {
+                debug!("reused upstream connection was closed; retrying");
+                *upstream = None;
+            }
+            Err(ref e)
+                if reused
+                    && retry_allowed
+                    && attempt == 1
+                    && exchange.interim.is_empty()
+                    && is_closed_connection(e) =>
+            {
+                debug!(error = %e, "reused upstream connection failed; retrying");
+                *upstream = None;
+            }
+            Ok(None) => {
+                *upstream = None;
+                return Err(format!(
+                    "{authority} closed the connection without a response"
+                ));
+            }
+            Err(e) => {
+                *upstream = None;
+                return Err(format!("error talking to {authority}: {e}"));
+            }
+        }
+    }
 }
 
 /// Parses a proxy request's absolute-form target and rewrites it to
