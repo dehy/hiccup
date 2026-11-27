@@ -48,6 +48,10 @@ pub mod method {
     pub const SCOPE_TEST: &str = "scope.test";
     /// Receive events on this connection.
     pub const EVENTS_SUBSCRIBE: &str = "events.subscribe";
+    /// List recorded exchanges.
+    pub const HISTORY_LIST: &str = "history.list";
+    /// Show one recorded exchange, with its bytes.
+    pub const HISTORY_SHOW: &str = "history.show";
 }
 
 /// Notification names.
@@ -81,6 +85,9 @@ pub struct InstanceInfo {
     pub api_version: String,
     /// When the instance started, in seconds since the Unix epoch.
     pub started_at: u64,
+    /// The project file history is recorded in, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// A per-host rule: `host` is a pattern (`example.com`, `*.example.com` or
@@ -333,6 +340,109 @@ pub struct ScopeTestResult {
     pub in_scope: bool,
 }
 
+/// Parameters of `history.list`. Every criterion set must match.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryListParams {
+    /// The host, exactly (ignoring case).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The request method, exactly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// The response status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// A prefix of the response's media type: `image/` matches `image/png`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// Text found in the request or the response (bytes, case-sensitive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    /// Only exchanges in scope (see `scope.add`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub in_scope: bool,
+    /// Only exchanges older than this ID: the last one of the previous page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    /// At most this many (default 100, at most 1000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// A recorded exchange, without its messages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySummary {
+    /// Its ID in the project: higher is newer.
+    pub id: u64,
+    /// When the request was received in full, in milliseconds since the
+    /// Unix epoch.
+    pub started_ms: u64,
+    /// How long the exchange took, in milliseconds.
+    pub duration_ms: u64,
+    /// The client's address.
+    pub client: String,
+    /// The upstream `host:port`.
+    pub upstream: String,
+    /// Whether it was decrypted from an intercepted TLS tunnel.
+    pub tls: bool,
+    /// The request method.
+    pub method: String,
+    /// The request target, as received.
+    pub target: String,
+    /// The response status, if a response arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// The response's media type, lowercase, without parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// Size of the request as received, in bytes.
+    pub request_size: u64,
+    /// Size of the response as kept, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_size: Option<u64>,
+    /// Only the start of a very large response body was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub response_truncated: bool,
+    /// The user edited the request in the intercept queue.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub request_edited: bool,
+    /// The user edited the response in the intercept queue.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub response_edited: bool,
+    /// Why the exchange failed, if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result of `history.list`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPage {
+    /// Newest first.
+    pub items: Vec<HistorySummary>,
+}
+
+/// Result of `history.show`. Messages are base64-encoded (RFC 4648).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryItem {
+    /// The summary.
+    #[serde(flatten)]
+    pub summary: HistorySummary,
+    /// The request exactly as received.
+    pub received: String,
+    /// The bytes forwarded upstream.
+    pub forwarded: String,
+    /// Interim (1xx) responses, concatenated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interim: Option<String>,
+    /// The response exactly as received, if one arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    /// The bytes sent to the client instead, when the user edited them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<String>,
+}
+
 /// `exchange.request`: a request was received, before it is held or
 /// forwarded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,6 +554,32 @@ fn example_intercept() -> InterceptStatus {
     }
 }
 
+fn example_history() -> HistorySummary {
+    HistorySummary {
+        id: 42,
+        started_ms: 1_764_000_000_000,
+        duration_ms: 87,
+        client: "127.0.0.1:52344".to_owned(),
+        upstream: "example.com:443".to_owned(),
+        tls: true,
+        method: "GET".to_owned(),
+        target: "/api/items?page=2".to_owned(),
+        status: Some(200),
+        mime: Some("application/json".to_owned()),
+        request_size: 412,
+        response_size: Some(5321),
+        response_truncated: false,
+        request_edited: false,
+        response_edited: false,
+        error: None,
+    }
+}
+
+const NO_PROJECT: (i64, &str) = (
+    -32001,
+    "no project is open (start the instance with --project)",
+);
+
 fn example_scope() -> ScopeRules {
     ScopeRules {
         rules: vec![
@@ -476,6 +612,7 @@ pub const METHODS: &[MessageDoc] = &[
                 version: "0.1.0".to_owned(),
                 api_version: API_VERSION.to_owned(),
                 started_at: 1_790_000_000,
+                project: Some("/home/me/work/acme.hiccup".to_owned()),
             })
         },
         errors: &[],
@@ -621,6 +758,41 @@ pub const METHODS: &[MessageDoc] = &[
         params: || json!({}),
         result: || json!({}),
         errors: &[],
+    },
+    MessageDoc {
+        name: method::HISTORY_LIST,
+        summary: "List recorded exchanges, newest first. History is recorded when the \
+                  instance has a project (`hiccup serve --project FILE`).",
+        params: || {
+            to_value(&HistoryListParams {
+                host: Some("example.com".to_owned()),
+                status: Some(200),
+                limit: Some(50),
+                ..HistoryListParams::default()
+            })
+        },
+        result: || {
+            to_value(&HistoryPage {
+                items: vec![example_history()],
+            })
+        },
+        errors: &[NO_PROJECT, (-32602, "`limit` is above 1000")],
+    },
+    MessageDoc {
+        name: method::HISTORY_SHOW,
+        summary: "Show one recorded exchange with its exact bytes.",
+        params: || to_value(&ItemParams { id: 42 }),
+        result: || {
+            to_value(&HistoryItem {
+                summary: example_history(),
+                received: "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…".to_owned(),
+                forwarded: "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…".to_owned(),
+                interim: None,
+                response: Some("SFRUUC8xLjEgMjAwIE9LDQo…".to_owned()),
+                delivered: None,
+            })
+        },
+        errors: &[NO_PROJECT, (-32602, "no recorded exchange has this ID")],
     },
     MessageDoc {
         name: method::SCOPE_LIST,
@@ -814,6 +986,9 @@ mod tests {
                 method::INTERCEPT_FORWARD => {
                     drop(serde_json::from_value::<ForwardParams>(params).unwrap())
                 }
+                method::HISTORY_LIST => {
+                    drop(serde_json::from_value::<HistoryListParams>(params).unwrap());
+                }
                 method::SCOPE_ADD => {
                     drop(serde_json::from_value::<ScopeRuleParams>(params).unwrap());
                 }
@@ -826,6 +1001,19 @@ mod tests {
                 _ => {}
             }
         }
+        // Results whose fields may be left out read back as written.
+        let item = to_value(&HistoryItem {
+            summary: example_history(),
+            received: String::new(),
+            forwarded: String::new(),
+            interim: None,
+            response: None,
+            delivered: None,
+        });
+        assert_eq!(
+            serde_json::from_value::<HistoryItem>(item).unwrap().summary,
+            example_history()
+        );
         let start: ProxyStartParams = serde_json::from_value(json!({})).unwrap();
         assert_eq!(start, ProxyStartParams::default());
         assert!(serde_json::from_value::<ProxyStartParams>(json!({"lisen": []})).is_err());

@@ -29,6 +29,7 @@ Result:
   "api_version": "1.0",
   "name": "default",
   "pid": 4242,
+  "project": "/home/me/work/acme.hiccup",
   "started_at": 1790000000,
   "version": "0.1.0"
 }
@@ -365,6 +366,87 @@ Result:
 ```json
 {}
 ```
+
+### `history.list`
+
+List recorded exchanges, newest first. History is recorded when the instance has a project (`hiccup serve --project FILE`).
+
+Parameters:
+
+```json
+{
+  "host": "example.com",
+  "limit": 50,
+  "status": 200
+}
+```
+
+Result:
+
+```json
+{
+  "items": [
+    {
+      "client": "127.0.0.1:52344",
+      "duration_ms": 87,
+      "id": 42,
+      "method": "GET",
+      "mime": "application/json",
+      "request_size": 412,
+      "response_size": 5321,
+      "started_ms": 1764000000000,
+      "status": 200,
+      "target": "/api/items?page=2",
+      "tls": true,
+      "upstream": "example.com:443"
+    }
+  ]
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: `limit` is above 1000
+
+### `history.show`
+
+Show one recorded exchange with its exact bytes.
+
+Parameters:
+
+```json
+{
+  "id": 42
+}
+```
+
+Result:
+
+```json
+{
+  "client": "127.0.0.1:52344",
+  "duration_ms": 87,
+  "forwarded": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+  "id": 42,
+  "method": "GET",
+  "mime": "application/json",
+  "received": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+  "request_size": 412,
+  "response": "SFRUUC8xLjEgMjAwIE9LDQo…",
+  "response_size": 5321,
+  "started_ms": 1764000000000,
+  "status": 200,
+  "target": "/api/items?page=2",
+  "tls": true,
+  "upstream": "example.com:443"
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no recorded exchange has this ID
 
 ### `scope.list`
 

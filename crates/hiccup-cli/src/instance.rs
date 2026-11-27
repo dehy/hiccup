@@ -61,6 +61,13 @@ where
         };
         let record = registration.record().clone();
         let instance = Instance::new(name, data_dir);
+        if let Some(project) = &globals.project {
+            if let Err(e) = instance.open_project(project) {
+                eprintln!("hiccup: cannot open the project {}: {e}", project.display());
+                return ExitCode::FAILURE;
+            }
+            eprintln!("Recording history in {}.", project.display());
+        }
         let handler: Arc<dyn Handler> = instance.clone();
         let stop_server = CancellationToken::new();
         let server = hiccup_control::serve(

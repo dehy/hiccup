@@ -334,20 +334,7 @@ fn show(args: &ShowArgs, globals: &Globals) -> ExitCode {
             s.size
         );
     }
-    // The bytes come from the client or the server: never let them drive
-    // the terminal (escape sequences can rewrite the screen or set the
-    // clipboard). Redirected, they are written exactly.
-    let raw = if std::io::stdout().is_terminal() {
-        let escaped = escape(&raw);
-        if args.raw && escaped.as_bytes() != raw.as_slice() {
-            eprintln!(
-                "Note: control characters are escaped; redirect the output for the exact bytes."
-            );
-        }
-        escaped.into_bytes()
-    } else {
-        raw
-    };
+    let raw = for_stdout(raw, args.raw);
     if stdout
         .write_all(&raw)
         .and_then(|()| stdout.flush())
@@ -356,6 +343,21 @@ fn show(args: &ShowArgs, globals: &Globals) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Message bytes, ready for standard output. They come from a client or a
+/// server: never let them drive a terminal (escape sequences can rewrite
+/// the screen or set the clipboard). Redirected, they are kept exact. With
+/// `exact_wanted`, says when escaping changed them.
+pub(crate) fn for_stdout(raw: Vec<u8>, exact_wanted: bool) -> Vec<u8> {
+    if !std::io::stdout().is_terminal() {
+        return raw;
+    }
+    let escaped = escape(&raw);
+    if exact_wanted && escaped.as_bytes() != raw.as_slice() {
+        eprintln!("Note: control characters are escaped; redirect the output for the exact bytes.");
+    }
+    escaped.into_bytes()
 }
 
 fn edit(args: &EditArgs, globals: &Globals) -> ExitCode {

@@ -7,7 +7,7 @@
 
 An open source, cross-platform web security testing toolkit written in Rust. Hiccup is an intercepting HTTP(S) proxy with a Repeater and native desktop interfaces for Linux, macOS and Windows.
 
-> **Status:** pre-alpha. The headless proxy works from the CLI, with HTTPS interception and an intercept queue, but there is no history, Repeater or GUI yet. Expect breaking changes. See the [roadmap](ROADMAP.md).
+> **Status:** pre-alpha. The headless proxy works from the CLI, with HTTPS interception, an intercept queue and history, but there is no Repeater or GUI yet. Expect breaking changes. See the [roadmap](ROADMAP.md).
 
 Hiccup is an independent project. It is not affiliated with or endorsed by PortSwigger Ltd. "Burp Suite" is a trademark of PortSwigger Ltd.
 
@@ -68,6 +68,16 @@ hiccup scope test https://app.example.com/login   # in scope
 hiccup intercept on --in-scope
 ```
 
+Record history in a project file, and search it:
+
+```sh
+hiccup --project acme.hiccup serve &
+hiccup proxy start
+hiccup history list --host app.example.com --status 500
+hiccup history show 42 --response > response.http   # the exact bytes
+hiccup history export > acme.jsonl                  # every exchange, in full
+```
+
 Watch traffic live, as text or one JSON object per line:
 
 ```sh
@@ -75,7 +85,7 @@ hiccup events
 hiccup --json events --filter exchange | jq .
 ```
 
-To use a browser, [install the Hiccup CA](docs/ca.md) and set `127.0.0.1:8080` as its HTTP and HTTPS proxy. Use `--tls-passthrough` for hosts that should not be decrypted. The proxy forwards, logs and intercepts traffic for now; history and the Repeater are next on the [roadmap](ROADMAP.md).
+To use a browser, [install the Hiccup CA](docs/ca.md) and set `127.0.0.1:8080` as its HTTP and HTTPS proxy. Use `--tls-passthrough` for hosts that should not be decrypted. The proxy forwards, intercepts and records traffic; the Repeater is next on the [roadmap](ROADMAP.md).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS and Windows.
 

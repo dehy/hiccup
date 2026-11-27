@@ -64,6 +64,17 @@ pub fn run(args: &EventsArgs, globals: &Globals) -> ExitCode {
     }
 }
 
+/// The URL of a request to `upstream` with this target; an absolute-form
+/// target already names the scheme and host.
+pub(crate) fn url(tls: bool, upstream: &str, target: &str) -> String {
+    if target.starts_with('/') {
+        let scheme = if tls { "https" } else { "http" };
+        format!("{scheme}://{upstream}{target}")
+    } else {
+        target.to_owned()
+    }
+}
+
 /// One line per event. Text from traffic is escaped: it must not drive the
 /// terminal.
 fn describe(event: &str, data: &Value) -> String {
@@ -71,14 +82,7 @@ fn describe(event: &str, data: &Value) -> String {
     let id = &data["id"];
     match event {
         notification::EXCHANGE_REQUEST => {
-            let target = text("target");
-            // An absolute-form target already names the scheme and host.
-            let url = if target.starts_with('/') {
-                let scheme = if data["tls"] == true { "https" } else { "http" };
-                format!("{scheme}://{}{target}", text("upstream"))
-            } else {
-                target
-            };
+            let url = url(data["tls"] == true, &text("upstream"), &text("target"));
             format!("#{id} {} {url}", text("method"))
         }
         notification::EXCHANGE_RESPONSE => match data["error"].as_str() {
