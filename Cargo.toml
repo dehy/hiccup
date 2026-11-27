@@ -47,6 +47,9 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 widestring = "1"
+# Windows only: Microsoft's own bindings, for the one call std lacks (a
+# file's owner, in hiccup-store). Already in the tree through tokio.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
 x509-parser = "0.18"
 
 [workspace.lints.rust]
