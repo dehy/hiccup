@@ -153,14 +153,16 @@ impl InterceptQueue {
     ///
     /// If a thread panicked while holding a lock.
     pub fn set(&self, settings: InterceptSettings) {
-        let release = |direction: Direction| self.release(|item| item.direction == direction);
-        if settings.requests.is_none() {
-            release(Direction::Request);
-        }
-        if settings.responses.is_none() {
-            release(Direction::Response);
-        }
+        let (requests_off, responses_off) =
+            (settings.requests.is_none(), settings.responses.is_none());
+        // Store first, then release: `hold` lists an item while it still
+        // holds the settings lock, so every item listed under the old
+        // settings is already in the queue by now, and none is listed after.
         *self.settings.write().expect("not poisoned") = settings;
+        self.release(|item| match item.direction {
+            Direction::Request => requests_off,
+            Direction::Response => responses_off,
+        });
     }
 
     /// The held items, oldest first.
@@ -236,26 +238,27 @@ impl InterceptQueue {
         request: &RequestInfo<'_>,
         item: impl FnOnce(u64) -> Pending,
     ) -> Verdict {
-        let (matches, timeout) = {
+        let (tx, rx) = oneshot::channel();
+        let (id, timeout) = {
+            // Listed while the settings are read-locked, so that `set` cannot
+            // turn this direction off and release in between.
             let settings = self.settings.read().expect("not poisoned");
             let rules = match direction {
                 Direction::Request => settings.requests.as_ref(),
                 Direction::Response => settings.responses.as_ref(),
             };
-            (rules.is_some_and(|r| r.matches(request)), settings.timeout)
+            if !rules.is_some_and(|r| r.matches(request)) {
+                return Verdict::Forward;
+            }
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+            let item = item(id);
+            info!(id, ?direction, method = %item.method, target = %item.target, "intercepted");
+            self.pending
+                .lock()
+                .expect("not poisoned")
+                .insert(id, Entry { item, verdict: tx });
+            (id, settings.timeout)
         };
-        if !matches {
-            return Verdict::Forward;
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let (tx, rx) = oneshot::channel();
-        let item = item(id);
-        info!(id, ?direction, method = %item.method, target = %item.target, "intercepted");
-        self.pending
-            .lock()
-            .expect("not poisoned")
-            .insert(id, Entry { item, verdict: tx });
         // If the connection goes away while waiting, unlist the item.
         let guard = Unlist { queue: self, id };
 
@@ -367,6 +370,38 @@ mod tests {
             queue.resolve(id, Verdict::Drop),
             Err(InterceptError::NotFound(id))
         );
+    }
+
+    /// Regression: an item listed while `set` turned its direction off was
+    /// held forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn turning_off_never_strands_a_racing_item() {
+        let on = || InterceptSettings {
+            requests: Some(InterceptRules::default()),
+            ..InterceptSettings::default()
+        };
+        let queue = InterceptQueue::new();
+        for _ in 0..500 {
+            queue.set(on());
+            let holds: Vec<_> = (0..4)
+                .map(|_| {
+                    let q = queue.clone();
+                    tokio::spawn(async move {
+                        q.hold(Direction::Request, &info("a", "GET", "/"), pending)
+                            .await
+                    })
+                })
+                .collect();
+            queue.set(InterceptSettings::default());
+            for held in holds {
+                let verdict = tokio::time::timeout(Duration::from_secs(5), held)
+                    .await
+                    .expect("released, not stranded")
+                    .unwrap();
+                assert_eq!(verdict, Verdict::Forward);
+            }
+            assert!(queue.list().is_empty());
+        }
     }
 
     #[tokio::test]

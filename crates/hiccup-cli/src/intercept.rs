@@ -501,14 +501,17 @@ fn introduces_bare_lf(original: &[u8], edited: &[u8]) -> bool {
 }
 
 /// Text safe to print to a terminal: control characters other than tab, LF
-/// and CR, and invalid UTF-8, are shown as `\xNN` or `\u{NN}`.
+/// and CRLF, and invalid UTF-8, are shown as `\xNN` or `\u{NN}`. A bare CR
+/// is escaped too: it would let the message overwrite what is printed.
 fn escape(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(bytes.len());
     for chunk in bytes.utf8_chunks() {
-        for c in chunk.valid().chars() {
+        let mut chars = chunk.valid().chars().peekable();
+        while let Some(c) = chars.next() {
             match c {
-                '\t' | '\n' | '\r' => out.push(c),
+                '\r' if chars.peek() == Some(&'\n') => out.push(c),
+                '\t' | '\n' => out.push(c),
                 c if c.is_control() && c.is_ascii() => {
                     let _ = write!(out, "\\x{:02x}", u32::from(c));
                 }
@@ -574,5 +577,11 @@ mod tests {
         );
         assert_eq!(escape("\u{9b}".as_bytes()), "\\u{9b}");
         assert_eq!(escape(b"a\x9bb"), "a\\x9bb");
+        // A bare CR could hide what precedes it on the line.
+        assert_eq!(
+            escape(b"Host: evil\rHost: good\r\n"),
+            "Host: evil\\x0dHost: good\r\n"
+        );
+        assert_eq!(escape(b"end\r"), "end\\x0d");
     }
 }
