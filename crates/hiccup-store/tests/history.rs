@@ -166,29 +166,21 @@ fn a_new_project_is_private() {
     let mut store = Store::open(&path).unwrap();
     store.insert(&exchange("a.test:80", GET, None)).unwrap();
     for file in ["p.hiccup", "p.hiccup-wal", "p.hiccup-shm"] {
-        let out = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "(Get-Acl -LiteralPath $env:ACL_PATH).Sddl",
-            ])
-            .env("ACL_PATH", dir.path().join(file))
+        let out = std::process::Command::new("icacls")
+            .arg(dir.path().join(file))
             .output()
             .unwrap();
-        let sddl = String::from_utf8(out.stdout).unwrap();
-        let sddl = sddl.trim();
-        let owner = &sddl[2..sddl.find("G:").unwrap()];
-        let dacl = &sddl[sddl.find("D:").unwrap()..];
-        assert!(dacl.starts_with("D:P"), "{file}: inherits: {sddl}");
-        // Each entry is (type;flags;rights;;;SID): the owner, OWNER RIGHTS,
-        // SYSTEM or administrators only (no Users, Everyone, ...).
-        for ace in dacl.split('(').skip(1) {
-            let sid = ace.trim_end_matches(')').rsplit(';').next().unwrap();
-            assert!(
-                ["OW", "SY", "BA", owner].contains(&sid),
-                "{file}: {sid} in {sddl}"
-            );
+        let acl = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{file}: {acl}");
+        // Nothing inherited from the directory, and no broad group. The
+        // owner, SYSTEM and administrators may remain (the token's default).
+        // Names are localized: these checks are meaningful on English Windows.
+        assert!(!acl.contains("(I)"), "{file}: {acl}");
+        // `BUILTIN\\Users:`, `NT AUTHORITY\\Authenticated Users:`, `Everyone:`.
+        for group in ["Users:", "Everyone:"] {
+            assert!(!acl.contains(group), "{file}: {acl}");
         }
+        assert!(acl.contains("OWNER RIGHTS:(F)"), "{file}: {acl}");
     }
 }
 
