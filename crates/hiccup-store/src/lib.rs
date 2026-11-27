@@ -14,6 +14,9 @@ use hiccup_proxy::{Exchange, Modification, Scheme, Scope, ScopeTarget};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
+#[cfg(windows)]
+mod owner;
+
 /// Schema migrations, in order. The database's `user_version` counts those
 /// applied. Never edit one that has shipped: append a new one.
 const MIGRATIONS: &[&str] = &[
@@ -186,6 +189,22 @@ impl Store {
         // its mode: tighten it too. Fails on a file we do not own.
         #[cfg(unix)]
         restrict(path)?;
+        // Windows: the DACL is set after SQLite opens the file (it creates
+        // -wal and -shm), so a file planted by another user, who stays its
+        // owner, must be refused before anything is written to it.
+        #[cfg(windows)]
+        {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(path)?;
+            if !owner::is_ours(path)? {
+                return Err(StoreError::Unsafe {
+                    path: path.display().to_string(),
+                    reason: "another user owns it",
+                });
+            }
+        }
         // A symbolic link swapped in since the check is refused here.
         let mut db = Connection::open_with_flags(
             path,
