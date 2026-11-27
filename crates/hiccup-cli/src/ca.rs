@@ -11,7 +11,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use hiccup_proxy::ca::{CERT_FILE, KEY_FILE};
 use hiccup_proxy::{CaError, CertificateAuthority};
 
-const INSTALL_GUIDE: &str = "https://github.com/dehy/hiccup/blob/main/docs/ca.md";
+pub const INSTALL_GUIDE: &str = "https://github.com/dehy/hiccup/blob/main/docs/ca.md";
 
 #[derive(Debug, Subcommand)]
 pub enum CaCommand {
@@ -70,8 +70,8 @@ pub fn run(command: CaCommand, data_dir: &Path) -> ExitCode {
     }
 }
 
-/// Loads the CA, generating it on first use.
-fn load(data_dir: &Path) -> Option<CertificateAuthority> {
+/// Loads the CA, generating it on first use. Errors are reported on stderr.
+pub fn load(data_dir: &Path) -> Option<CertificateAuthority> {
     match CertificateAuthority::load_or_generate(data_dir) {
         Ok((ca, created)) => {
             if created {

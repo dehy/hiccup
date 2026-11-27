@@ -5,16 +5,20 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use hiccup_http::{Error as HttpError, Framing, Head, Limits, Request, Response};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use rustls::pki_types::ServerName;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::io::{Io, Prefixed};
 use crate::target::{AbsoluteTarget, Authority, TargetError};
+use crate::tls::Interceptor;
 use crate::{Exchange, ExchangeObserver, Modification, ProxyConfig};
 
 const READ_CHUNK: usize = 16 * 1024;
@@ -23,14 +27,27 @@ const READ_CHUNK: usize = 16 * 1024;
 pub(crate) struct Context {
     pub(crate) config: ProxyConfig,
     pub(crate) observer: Option<ExchangeObserver>,
+    pub(crate) interceptor: Option<Interceptor>,
     pub(crate) shutdown: CancellationToken,
 }
 
 /// An upstream connection kept alive between requests.
 struct Upstream {
     authority: Authority,
-    stream: TcpStream,
+    stream: Box<dyn Io>,
     buf: BytesMut,
+}
+
+/// What a client connection carries.
+enum Mode {
+    /// Proxy requests: absolute-form targets, and `CONNECT`.
+    Proxy,
+    /// Requests decrypted from an intercepted TLS tunnel to `authority`.
+    /// They are forwarded as received, over TLS, with `server_name` as SNI.
+    Intercepted {
+        authority: Authority,
+        server_name: ServerName<'static>,
+    },
 }
 
 enum Next {
@@ -39,29 +56,43 @@ enum Next {
 }
 
 pub(crate) async fn handle(mut client: TcpStream, peer: SocketAddr, ctx: Arc<Context>) {
-    match serve(&mut client, peer, &ctx).await {
+    let mut buf = BytesMut::with_capacity(READ_CHUNK);
+    let result = match serve(&mut client, &mut buf, peer, &Mode::Proxy, &ctx).await {
+        Ok(Some(connect)) => handle_connect(client, buf, peer, &connect, &ctx).await,
+        Ok(None) => Ok(()),
+        Err(e) => Err(e),
+    };
+    match result {
         Ok(()) => debug!("connection closed"),
         Err(e) => debug!(error = %e, "connection ended with an error"),
     }
 }
 
-async fn serve(client: &mut TcpStream, peer: SocketAddr, ctx: &Context) -> io::Result<()> {
-    let mut buf = BytesMut::with_capacity(READ_CHUNK);
+/// Serves requests until the connection closes. In proxy mode, returns a
+/// `CONNECT` request for the caller to handle; `buf` then holds the bytes
+/// received after it.
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut S,
+    buf: &mut BytesMut,
+    peer: SocketAddr,
+    mode: &Mode,
+    ctx: &Context,
+) -> io::Result<Option<Request>> {
     let mut upstream: Option<Upstream> = None;
     loop {
-        let Some(request) = read_request(client, &mut buf, ctx).await? else {
-            return Ok(());
+        let Some(request) = read_request(client, buf, ctx).await? else {
+            return Ok(None);
         };
         let _ = buf.split_to(request.len());
 
-        if request.head().method() == b"CONNECT" {
-            return connect_tunnel(client, &buf, &request, ctx).await;
+        if matches!(mode, Mode::Proxy) && request.head().method() == b"CONNECT" {
+            return Ok(Some(request));
         }
-        match forward(client, &mut buf, peer, request, &mut upstream, ctx).await? {
+        match forward(client, buf, peer, request, mode, &mut upstream, ctx).await? {
             Next::Continue => {}
             Next::Close => {
                 let _ = client.shutdown().await;
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -73,8 +104,8 @@ async fn serve(client: &mut TcpStream, peer: SocketAddr, ctx: &Context) -> io::R
 /// Reads the next complete request. Returns `None` when the connection should
 /// close without a response (EOF, idle timeout, shutdown, or an error that was
 /// already answered).
-async fn read_request(
-    client: &mut TcpStream,
+async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut S,
     buf: &mut BytesMut,
     ctx: &Context,
 ) -> io::Result<Option<Request>> {
@@ -153,8 +184,8 @@ async fn read_response(
     }
 }
 
-async fn read_with_timeout(
-    stream: &mut TcpStream,
+async fn read_with_timeout<S: AsyncRead + Unpin>(
+    stream: &mut S,
     buf: &mut BytesMut,
     timeout: Duration,
 ) -> io::Result<usize> {
@@ -168,50 +199,44 @@ async fn read_with_timeout(
 // ---------------------------------------------------------------------------
 // Forwarding
 
-async fn forward(
-    client: &mut TcpStream,
+async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut S,
     client_buf: &mut BytesMut,
     peer: SocketAddr,
     request: Request,
+    mode: &Mode,
     upstream: &mut Option<Upstream>,
     ctx: &Context,
 ) -> io::Result<Next> {
-    let target = match AbsoluteTarget::parse(request.head().target()) {
-        Ok(t) => t,
-        Err(e) => {
-            let (status, reason, detail) = match e {
-                TargetError::OriginForm => (
-                    400,
-                    "Bad Request",
-                    "request target is not in absolute-form; configure Hiccup as an HTTP proxy \
-                     (invisible proxying is not supported yet)"
-                        .to_owned(),
-                ),
-                TargetError::UnsupportedScheme(s) => (
-                    501,
-                    "Not Implemented",
-                    format!("scheme {s:?} is not supported in absolute-form requests"),
-                ),
-                TargetError::Invalid => (400, "Bad Request", "invalid request target".to_owned()),
-            };
-            write_error(client, status, reason, &detail).await;
-            return Ok(Next::Close);
-        }
+    let (authority, forwarded, modifications) = match mode {
+        Mode::Proxy => match proxy_target(client, &request).await {
+            Some((target, forwarded, modification)) => {
+                (target.authority, forwarded, vec![modification])
+            }
+            None => return Ok(Next::Close),
+        },
+        // Inside a tunnel, the client already addresses the origin server.
+        Mode::Intercepted { authority, .. } => (
+            authority.clone(),
+            Bytes::from(request.to_bytes()),
+            Vec::new(),
+        ),
     };
 
-    let (forwarded, modification) = rewrite_target(&request, &target);
     let mut exchange = Exchange {
         client: peer,
-        upstream: target.authority.to_string(),
+        upstream: authority.to_string(),
+        tls: matches!(mode, Mode::Intercepted { .. }),
         received: request,
         forwarded,
-        modifications: vec![modification],
+        modifications,
         interim: Vec::new(),
         response: None,
         error: None,
     };
     info!(
         method = %String::from_utf8_lossy(exchange.received.head().method()),
+        upstream = %exchange.upstream,
         target = %String::from_utf8_lossy(exchange.received.head().target()),
         "request"
     );
@@ -221,20 +246,17 @@ async fn forward(
     let mut attempt = 0;
     let response = loop {
         attempt += 1;
-        let reused = upstream
-            .as_ref()
-            .is_some_and(|u| u.authority == target.authority);
+        let reused = upstream.as_ref().is_some_and(|u| u.authority == authority);
         if !reused {
-            match connect(&target.authority, ctx.config.connect_timeout).await {
+            match open_upstream(&authority, mode, ctx).await {
                 Ok(stream) => {
                     *upstream = Some(Upstream {
-                        authority: target.authority.clone(),
+                        authority: authority.clone(),
                         stream,
                         buf: BytesMut::with_capacity(READ_CHUNK),
                     });
                 }
-                Err(e) => {
-                    let detail = format!("cannot connect to {}: {e}", target.authority);
+                Err(detail) => {
                     return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
                 }
             }
@@ -280,15 +302,12 @@ async fn forward(
             }
             Ok(None) => {
                 *upstream = None;
-                let detail = format!(
-                    "{} closed the connection without a response",
-                    target.authority
-                );
+                let detail = format!("{} closed the connection without a response", authority);
                 return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
             }
             Err(e) => {
                 *upstream = None;
-                let detail = format!("error talking to {}: {e}", target.authority);
+                let detail = format!("error talking to {authority}: {e}");
                 return fail(client, exchange, 502, "Bad Gateway", detail, ctx).await;
             }
         }
@@ -316,6 +335,61 @@ async fn forward(
     } else {
         Next::Close
     })
+}
+
+/// Parses a proxy request's absolute-form target and rewrites it to
+/// origin-form. Answers the client and returns `None` if it cannot.
+async fn proxy_target<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut S,
+    request: &Request,
+) -> Option<(AbsoluteTarget, Bytes, Modification)> {
+    let (status, reason, detail) = match AbsoluteTarget::parse(request.head().target()) {
+        Ok(target) => {
+            let (forwarded, modification) = rewrite_target(request, &target);
+            return Some((target, forwarded, modification));
+        }
+        Err(TargetError::OriginForm) => (
+            400,
+            "Bad Request",
+            "request target is not in absolute-form; configure Hiccup as an HTTP proxy \
+             (invisible proxying is not supported yet)"
+                .to_owned(),
+        ),
+        Err(TargetError::UnsupportedScheme(s)) => (
+            501,
+            "Not Implemented",
+            format!("scheme {s:?} is not supported in absolute-form requests"),
+        ),
+        Err(TargetError::Invalid) => (400, "Bad Request", "invalid request target".to_owned()),
+    };
+    write_error(client, status, reason, &detail).await;
+    None
+}
+
+/// Connects to `authority`, over TLS in an intercepted tunnel. The error is a
+/// message for the client.
+async fn open_upstream(
+    authority: &Authority,
+    mode: &Mode,
+    ctx: &Context,
+) -> Result<Box<dyn Io>, String> {
+    let tcp = connect(authority, ctx.config.connect_timeout)
+        .await
+        .map_err(|e| format!("cannot connect to {authority}: {e}"))?;
+    let Mode::Intercepted { server_name, .. } = mode else {
+        return Ok(Box::new(tcp));
+    };
+    let interceptor = ctx
+        .interceptor
+        .as_ref()
+        .expect("tunnels are intercepted only with an interceptor");
+    let handshake =
+        TlsConnector::from(interceptor.client_config()).connect(server_name.clone(), tcp);
+    match tokio::time::timeout(ctx.config.connect_timeout, handshake).await {
+        Ok(Ok(tls)) => Ok(Box::new(tls)),
+        Ok(Err(e)) => Err(format!("TLS handshake with {authority} failed: {e}")),
+        Err(_) => Err(format!("TLS handshake with {authority} timed out")),
+    }
 }
 
 /// Replaces the absolute-form target with origin-form, keeping every other
@@ -379,15 +453,18 @@ fn is_idempotent(method: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // CONNECT tunnels
 
-async fn connect_tunnel(
-    client: &mut TcpStream,
-    pending: &[u8],
+/// Handles a `CONNECT` request: intercepts TLS, or relays bytes untouched.
+/// `pending` holds the bytes the client sent after the request.
+async fn handle_connect(
+    mut client: TcpStream,
+    mut pending: BytesMut,
+    peer: SocketAddr,
     request: &Request,
     ctx: &Context,
 ) -> io::Result<()> {
     let Some(authority) = Authority::parse(request.head().target(), None) else {
         write_error(
-            client,
+            &mut client,
             400,
             "Bad Request",
             "invalid CONNECT target, expected host:port",
@@ -395,32 +472,123 @@ async fn connect_tunnel(
         .await;
         return Ok(());
     };
-    info!(%authority, "CONNECT");
-    let mut upstream = match connect(&authority, ctx.config.connect_timeout).await {
+    let intercept = ctx.interceptor.is_some()
+        && !ctx
+            .config
+            .tls_passthrough
+            .iter()
+            .any(|p| p.matches(&authority.host));
+    info!(%authority, intercept, "CONNECT");
+    if !intercept {
+        return pass_through(client, &pending, &authority, ctx).await;
+    }
+
+    // Answer first: the upstream connection is opened per request, so that
+    // connection errors reach the client as error responses.
+    client
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await?;
+    while pending.is_empty() {
+        if read_with_timeout(&mut client, &mut pending, ctx.config.read_timeout).await? == 0 {
+            return Ok(());
+        }
+    }
+    // A TLS record starts with the handshake content type (RFC 8446 §5.1).
+    if pending[0] != 0x16 {
+        debug!("the tunnel does not carry TLS; relaying it");
+        let mut upstream = connect(&authority, ctx.config.connect_timeout).await?;
+        return tunnel(&mut client, &pending, &mut upstream, &[]).await;
+    }
+
+    let interceptor = ctx.interceptor.as_ref().expect("checked above");
+    let io = Prefixed::new(pending.freeze(), client);
+    let accept = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), io);
+    let start = match tokio::time::timeout(ctx.config.read_timeout, accept).await {
+        Ok(Ok(start)) => start,
+        Ok(Err(e)) => {
+            info!(%authority, error = %e, "invalid TLS ClientHello");
+            return Ok(());
+        }
+        Err(_) => return Ok(()),
+    };
+    let sni = start.client_hello().server_name().map(str::to_owned);
+    let host = sni.unwrap_or_else(|| authority.host.clone());
+    let config = match interceptor.server_config(&host) {
+        Ok(config) => config,
+        Err(e) => {
+            warn!(%host, error = %e, "cannot create a certificate");
+            return Ok(());
+        }
+    };
+    let mut tls =
+        match tokio::time::timeout(ctx.config.read_timeout, start.into_stream(config)).await {
+            Ok(Ok(tls)) => tls,
+            Ok(Err(e)) => {
+                // Usually the client does not trust the CA, or pins certificates.
+                info!(
+                    %host,
+                    error = %e,
+                    "TLS handshake with the client failed; is the Hiccup CA installed? \
+                     Clients that pin certificates need --tls-passthrough"
+                );
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
+        };
+    debug!(%host, "TLS intercepted");
+
+    let server_name =
+        ServerName::try_from(host).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mode = Mode::Intercepted {
+        authority,
+        server_name,
+    };
+    let mut buf = BytesMut::with_capacity(READ_CHUNK);
+    serve(&mut tls, &mut buf, peer, &mode, ctx).await.map(drop)
+}
+
+/// Relays a `CONNECT` tunnel without looking inside.
+async fn pass_through(
+    mut client: TcpStream,
+    pending: &[u8],
+    authority: &Authority,
+    ctx: &Context,
+) -> io::Result<()> {
+    let mut upstream = match connect(authority, ctx.config.connect_timeout).await {
         Ok(s) => s,
         Err(e) => {
             let detail = format!("cannot connect to {authority}: {e}");
-            write_error(client, 502, "Bad Gateway", &detail).await;
+            write_error(&mut client, 502, "Bad Gateway", &detail).await;
             return Ok(());
         }
     };
     client
         .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
         .await?;
-    tunnel(client, pending, &mut upstream, &[]).await
+    tunnel(&mut client, pending, &mut upstream, &[]).await
 }
 
 /// Relays bytes in both directions until either side closes.
-async fn tunnel(
-    client: &mut TcpStream,
+async fn tunnel<C, U>(
+    client: &mut C,
     client_pending: &[u8],
-    upstream: &mut TcpStream,
+    upstream: &mut U,
     upstream_pending: &[u8],
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    U: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    let started = Instant::now();
     upstream.write_all(client_pending).await?;
     client.write_all(upstream_pending).await?;
     let (to_upstream, to_client) = tokio::io::copy_bidirectional(client, upstream).await?;
-    debug!(to_upstream, to_client, "tunnel closed");
+    debug!(
+        to_upstream,
+        to_client,
+        duration_ms = started.elapsed().as_millis(),
+        "tunnel closed"
+    );
     Ok(())
 }
 
@@ -444,8 +612,8 @@ fn notify(ctx: &Context, exchange: &Exchange) {
     }
 }
 
-async fn fail(
-    client: &mut TcpStream,
+async fn fail<S: AsyncWrite + AsyncRead + Unpin>(
+    client: &mut S,
     mut exchange: Exchange,
     status: u16,
     reason: &str,
@@ -453,13 +621,14 @@ async fn fail(
     ctx: &Context,
 ) -> io::Result<Next> {
     warn!(error = %detail, "exchange failed");
-    write_error(client, status, reason, &detail).await;
-    exchange.error = Some(detail);
+    // Record first: writing the error lingers on the connection.
+    exchange.error = Some(detail.clone());
     notify(ctx, &exchange);
+    write_error(client, status, reason, &detail).await;
     Ok(Next::Close)
 }
 
-async fn send_error(client: &mut TcpStream, error: &HttpError) {
+async fn send_error<S: AsyncWrite + AsyncRead + Unpin>(client: &mut S, error: &HttpError) {
     let (status, reason) = match error {
         HttpError::HeadTooLarge { .. } | HttpError::TooManyHeaders { .. } => {
             (431, "Request Header Fields Too Large")
@@ -470,7 +639,12 @@ async fn send_error(client: &mut TcpStream, error: &HttpError) {
 }
 
 /// Writes an error response generated by Hiccup and closes the connection.
-async fn write_error(client: &mut TcpStream, status: u16, reason: &str, detail: &str) {
+async fn write_error<S: AsyncWrite + AsyncRead + Unpin>(
+    client: &mut S,
+    status: u16,
+    reason: &str,
+    detail: &str,
+) {
     let body = format!("Hiccup: {detail}\n");
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\n\
@@ -490,7 +664,7 @@ async fn write_error(client: &mut TcpStream, status: u16, reason: &str, detail: 
 /// Closing a socket with unread data makes the OS send a TCP reset, which can
 /// destroy the error response before the client reads it (notably on
 /// Windows). Draining first lets the response arrive ("lingering close").
-async fn linger(client: &mut TcpStream) {
+async fn linger<S: AsyncRead + Unpin>(client: &mut S) {
     const MAX_BYTES: usize = 256 * 1024;
     let drain = async {
         let mut sink = [0u8; 8192];

@@ -14,7 +14,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::connection::{self, Context};
-use crate::{ExchangeObserver, ProxyConfig};
+use crate::tls::Interceptor;
+use crate::{CaError, CertificateAuthority, ExchangeObserver, ProxyConfig};
 
 /// An intercepting HTTP proxy, bound and ready to serve.
 ///
@@ -34,6 +35,7 @@ pub struct Proxy {
     listeners: Vec<TcpListener>,
     config: ProxyConfig,
     observer: Option<ExchangeObserver>,
+    interceptor: Option<Interceptor>,
 }
 
 impl Proxy {
@@ -54,6 +56,7 @@ impl Proxy {
             listeners,
             config,
             observer: None,
+            interceptor: None,
         })
     }
 
@@ -62,6 +65,18 @@ impl Proxy {
     pub fn with_observer(mut self, observer: ExchangeObserver) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    /// Intercepts TLS in `CONNECT` tunnels with certificates signed by `ca`.
+    ///
+    /// Without it, every tunnel is relayed untouched.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the key for leaf certificates cannot be generated.
+    pub fn intercept_tls(mut self, ca: Arc<CertificateAuthority>) -> Result<Self, CaError> {
+        self.interceptor = Some(Interceptor::new(ca)?);
+        Ok(self)
     }
 
     /// The addresses actually bound (useful with port `0`).
@@ -82,6 +97,7 @@ impl Proxy {
         let ctx = Arc::new(Context {
             config: self.config,
             observer: self.observer,
+            interceptor: self.interceptor,
             shutdown: shutdown.clone(),
         });
         let (tx, mut rx) = mpsc::channel::<(TcpStream, SocketAddr, SocketAddr)>(64);

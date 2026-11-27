@@ -25,9 +25,13 @@ cargo build --release
 ```sh
 hiccup proxy start --foreground            # listens on 127.0.0.1:8080
 curl -x http://127.0.0.1:8080 http://example.com/
+
+# HTTPS is decrypted with a CA generated for your installation:
+hiccup ca export -o hiccup.pem
+curl -x http://127.0.0.1:8080 --cacert hiccup.pem https://example.com/
 ```
 
-So far Hiccup forwards HTTP and tunnels HTTPS (`CONNECT`) without decrypting it. Interception, history and TLS inspection are coming next; see the [roadmap](ROADMAP.md).
+To use a browser, [install the Hiccup CA](docs/ca.md) and set `127.0.0.1:8080` as its HTTP and HTTPS proxy. Use `--tls-passthrough` for hosts that should not be decrypted. The proxy only forwards traffic and logs it for now; history, interception and the Repeater are next on the [roadmap](ROADMAP.md).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS and Windows.
 
