@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Local certificate authority for HTTPS interception: an ECDSA P-256 root CA, generated per installation on first use and stored in the per-user data directory with an owner-only private key.
+  - `hiccup ca info` shows its location, validity and SHA-256 fingerprint.
+  - `hiccup ca export [--format pem|der] [-o FILE]` exports the certificate.
+  - `hiccup ca regenerate --yes` replaces it.
+  - The global `--data-dir` option (or `HICCUP_DATA_DIR`) overrides the data directory.
+  - [Install guide](docs/ca.md) for Firefox, Linux, macOS and Windows.
 - `hiccup-proxy`: explicit HTTP/1.1 proxy.
   - Absolute-form requests are forwarded in origin-form, and the rewrite is recorded. Every other byte, including hop-by-hop headers, is forwarded as received.
   - Keep-alive on both sides with upstream reuse, a retry for idempotent requests on stale connections, and pipelining.
