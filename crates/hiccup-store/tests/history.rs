@@ -166,15 +166,29 @@ fn a_new_project_is_private() {
     let mut store = Store::open(&path).unwrap();
     store.insert(&exchange("a.test:80", GET, None)).unwrap();
     for file in ["p.hiccup", "p.hiccup-wal", "p.hiccup-shm"] {
-        let out = std::process::Command::new("icacls")
-            .arg(dir.path().join(file))
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-Acl -LiteralPath $env:ACL_PATH).Sddl",
+            ])
+            .env("ACL_PATH", dir.path().join(file))
             .output()
             .unwrap();
-        let acl = String::from_utf8_lossy(&out.stdout);
-        // No inherited entry, and only the owner and SYSTEM: SIDs print as
-        // localized names, so count the entries instead.
-        assert!(!acl.contains("(I)"), "{file}: {acl}");
-        assert_eq!(acl.matches(":(F)").count(), 2, "{file}: {acl}");
+        let sddl = String::from_utf8(out.stdout).unwrap();
+        let sddl = sddl.trim();
+        let owner = &sddl[2..sddl.find("G:").unwrap()];
+        let dacl = &sddl[sddl.find("D:").unwrap()..];
+        assert!(dacl.starts_with("D:P"), "{file}: inherits: {sddl}");
+        // Each entry is (type;flags;rights;;;SID): the owner, OWNER RIGHTS,
+        // SYSTEM or administrators only (no Users, Everyone, ...).
+        for ace in dacl.split('(').skip(1) {
+            let sid = ace.trim_end_matches(')').rsplit(';').next().unwrap();
+            assert!(
+                ["OW", "SY", "BA", owner].contains(&sid),
+                "{file}: {sid} in {sddl}"
+            );
+        }
     }
 }
 

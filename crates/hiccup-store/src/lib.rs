@@ -356,10 +356,11 @@ fn migrate(db: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Gives the project's files the control pipe's protected DACL: full access
-/// for their owner and `SYSTEM` only. Files on Windows inherit their
-/// directory's ACL, and SQLite creates its -wal and -shm files anew, so this
-/// runs on every open, once they exist.
+/// Makes the project's files private: drops what they inherit from their
+/// directory (e.g. `Users`) and grants their owner and `SYSTEM`. What is
+/// left besides is the creating token's default (owner, `SYSTEM`,
+/// administrators). SQLite creates its -wal and -shm files anew, so this runs
+/// on every open, once they exist.
 // shortcut: runs the built-in icacls (no `unsafe` for the Win32 security API);
 // set the DACL directly if opening a project ever needs to be faster.
 #[cfg(windows)]
