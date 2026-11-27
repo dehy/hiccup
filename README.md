@@ -1,5 +1,10 @@
 # Hiccup
 
+[![CI](https://github.com/dehy/hiccup/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dehy/hiccup/actions/workflows/ci.yml?query=branch%3Amain)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=dehy_hiccup&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dehy_hiccup)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=dehy_hiccup&metric=coverage)](https://sonarcloud.io/component_measures?id=dehy_hiccup&metric=coverage)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+
 An open source, cross-platform web security testing toolkit written in Rust. Hiccup is an intercepting HTTP(S) proxy with a Repeater and native desktop interfaces for Linux, macOS and Windows.
 
 > **Status:** pre-alpha, in planning. There is no usable code yet. See the [roadmap](ROADMAP.md).
