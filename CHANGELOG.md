@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `hiccup-store`: proxy history in a SQLite project file (`.hiccup`). Every exchange keeps its exact bytes (received, forwarded, interim, response, delivered), timings, TLS flag and edited flags. Raw messages live in a separate blob table, and schema migrations are tracked with `user_version`.
+  - Newest-first pages filtered by host, method, status, media type prefix and byte search.
+  - 10k exchanges: p95 under 50 ms to insert and to query (`cargo test --release -p hiccup-store -- --ignored`).
+  - Not yet wired to the instance; `--project` and `hiccup history` come with the CLI work.
+- `Exchange::started` and `Exchange::duration`.
 - Intercept queue. Matching requests and responses are held until they are forwarded, forwarded edited (the bytes are sent exactly as edited), or dropped. After an edited request, the upstream connection is not reused.
   - Rules per direction match the request's host patterns, methods and a path regex.
   - An optional timeout forwards or drops whatever nobody acts on.

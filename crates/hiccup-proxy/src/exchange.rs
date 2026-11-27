@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use hiccup_http::{Request, Response};
@@ -32,6 +33,11 @@ pub enum Modification {
 /// One request and its response, as seen by the proxy.
 #[derive(Clone, Debug)]
 pub struct Exchange {
+    /// When the request was received in full.
+    pub started: SystemTime,
+    /// From `started` until the exchange completed, including any time held
+    /// in the intercept queue.
+    pub duration: Duration,
     /// The client's address.
     pub client: SocketAddr,
     /// The upstream `host:port`.

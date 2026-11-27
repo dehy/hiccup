@@ -30,6 +30,8 @@ dirs = "7"
 interprocess = { version = "=2.4.8", features = ["tokio"] }
 proptest = "1"
 regex = "1"
+# SQLite is compiled in (bundled): the same version on every OS.
+rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 ring = "0.17"
 rustls-platform-verifier = "0.7"
