@@ -88,16 +88,35 @@ impl AbsoluteTarget {
     ///
     /// See [`TargetError`].
     pub fn parse(target: &[u8]) -> Result<Self, TargetError> {
+        match Self::parse_url(target)? {
+            (false, target) => Ok(target),
+            (true, _) => Err(TargetError::UnsupportedScheme(
+                String::from_utf8_lossy(&target[..find(target, b"://").unwrap_or(0)]).into_owned(),
+            )),
+        }
+    }
+
+    /// Parses an `http://` or `https://` URL. Returns whether it is `https`,
+    /// and the target (port 443 by default for `https`).
+    ///
+    /// # Errors
+    ///
+    /// See [`TargetError`].
+    pub fn parse_url(target: &[u8]) -> Result<(bool, Self), TargetError> {
         if target.first() == Some(&b'/') {
             return Err(TargetError::OriginForm);
         }
         let sep = find(target, b"://").ok_or(TargetError::Invalid)?;
         let scheme = &target[..sep];
-        if !scheme.eq_ignore_ascii_case(b"http") {
+        let https = if scheme.eq_ignore_ascii_case(b"http") {
+            false
+        } else if scheme.eq_ignore_ascii_case(b"https") {
+            true
+        } else {
             return Err(TargetError::UnsupportedScheme(
                 String::from_utf8_lossy(scheme).into_owned(),
             ));
-        }
+        };
         let rest = &target[sep + 3..];
         let auth_end = rest
             .iter()
@@ -108,7 +127,9 @@ impl AbsoluteTarget {
         if let Some(at) = authority.iter().rposition(|&b| b == b'@') {
             authority = &authority[at + 1..];
         }
-        let authority = Authority::parse(authority, Some(80)).ok_or(TargetError::Invalid)?;
+        let default_port = if https { 443 } else { 80 };
+        let authority =
+            Authority::parse(authority, Some(default_port)).ok_or(TargetError::Invalid)?;
 
         let path = &rest[auth_end..];
         let path = path.split(|&b| b == b'#').next().unwrap_or_default();
@@ -116,10 +137,13 @@ impl AbsoluteTarget {
             Some(b'/') => path.to_vec(),
             _ => [b"/".as_slice(), path].concat(),
         };
-        Ok(Self {
-            authority,
-            origin_form,
-        })
+        Ok((
+            https,
+            Self {
+                authority,
+                origin_form,
+            },
+        ))
     }
 }
 

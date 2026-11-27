@@ -59,6 +59,15 @@ hiccup intercept drop 2
 hiccup intercept off                       # forwards whatever is still held
 ```
 
+Define what you are testing, and hold only that:
+
+```sh
+hiccup scope add --protocol https --host '*.example.com'
+hiccup scope add --exclude --path '^/logout'
+hiccup scope test https://app.example.com/login   # in scope
+hiccup intercept on --in-scope
+```
+
 To use a browser, [install the Hiccup CA](docs/ca.md) and set `127.0.0.1:8080` as its HTTP and HTTPS proxy. Use `--tls-passthrough` for hosts that should not be decrypted. The proxy forwards, logs and intercepts traffic for now; history and the Repeater are next on the [roadmap](ROADMAP.md).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS and Windows.

@@ -105,6 +105,34 @@ where
     })
 }
 
+pub fn to_value<T: serde::Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).expect("API types serialize")
+}
+
+/// Calls `method`; prints the result with `human`, or as JSON.
+pub fn call_method(
+    globals: &Globals,
+    method: &'static str,
+    params: Value,
+    human: impl FnOnce(Value),
+) -> ExitCode {
+    let Some(result) = request(globals, method, params) else {
+        return ExitCode::FAILURE;
+    };
+    if globals.json {
+        crate::print_json(&result);
+    } else {
+        human(result);
+    }
+    ExitCode::SUCCESS
+}
+
+pub fn request(globals: &Globals, method: &'static str, params: Value) -> Option<Value> {
+    call(globals, move |client| {
+        Box::pin(async move { client.call_value(method, params).await })
+    })
+}
+
 /// `hiccup serve`: run an instance until Ctrl+C or `hiccup instance stop`.
 pub fn serve(globals: &Globals) -> ExitCode {
     host(globals, |hosted: Hosted| async move {

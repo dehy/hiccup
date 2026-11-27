@@ -17,6 +17,7 @@ rusqlite.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+regex.workspace = true
 tempfile.workspace = true
 
 [lints]

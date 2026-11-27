@@ -362,9 +362,17 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
 
     let method_name = String::from_utf8_lossy(exchange.received.head().method()).into_owned();
     let rule_input = RequestInfo {
-        host: &authority.host,
         method: &method_name,
-        target: &path,
+        target: crate::ScopeTarget {
+            scheme: if exchange.tls {
+                crate::Scheme::Https
+            } else {
+                crate::Scheme::Http
+            },
+            host: &authority.host,
+            port: authority.port,
+            path: &path,
+        },
     };
     let (upstream_name, tls) = (exchange.upstream.clone(), exchange.tls);
     let pending = |direction, raw: Bytes, status| {

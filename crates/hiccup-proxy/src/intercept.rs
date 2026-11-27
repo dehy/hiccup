@@ -12,7 +12,7 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 use tracing::{debug, info};
 
-use crate::HostPattern;
+use crate::{HostPattern, Scope, ScopeTarget};
 
 /// Which message is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,16 +33,19 @@ pub struct InterceptRules {
     /// Matched against the request target (path and query, or the whole
     /// absolute-form target as forwarded).
     pub path: Option<regex::Regex>,
+    /// Only what is in the queue's [`Scope`].
+    pub in_scope: bool,
 }
 
 impl InterceptRules {
-    fn matches(&self, request: &RequestInfo<'_>) -> bool {
-        (self.hosts.is_empty() || self.hosts.iter().any(|h| h.matches(request.host)))
+    fn matches(&self, request: &RequestInfo<'_>, scope: &Scope) -> bool {
+        (!self.in_scope || scope.contains(&request.target))
+            && (self.hosts.is_empty() || self.hosts.iter().any(|h| h.matches(request.target.host)))
             && (self.methods.is_empty() || self.methods.iter().any(|m| m == request.method))
             && self
                 .path
                 .as_ref()
-                .is_none_or(|re| re.is_match(request.target))
+                .is_none_or(|re| re.is_match(request.target.path))
     }
 }
 
@@ -67,12 +70,12 @@ pub struct InterceptSettings {
 }
 
 impl InterceptSettings {
-    fn matches(&self, direction: Direction, request: &RequestInfo<'_>) -> bool {
+    fn matches(&self, direction: Direction, request: &RequestInfo<'_>, scope: &Scope) -> bool {
         let rules = match direction {
             Direction::Request => self.requests.as_ref(),
             Direction::Response => self.responses.as_ref(),
         };
-        rules.is_some_and(|r| r.matches(request))
+        rules.is_some_and(|r| r.matches(request, scope))
     }
 }
 
@@ -120,9 +123,9 @@ pub enum InterceptError {
 
 /// The request an item belongs to, for rule matching.
 pub(crate) struct RequestInfo<'a> {
-    pub(crate) host: &'a str,
     pub(crate) method: &'a str,
-    pub(crate) target: &'a str,
+    /// Its path is the request target as forwarded.
+    pub(crate) target: ScopeTarget<'a>,
 }
 
 struct Entry {
@@ -135,6 +138,7 @@ struct Entry {
 #[derive(Default)]
 pub struct InterceptQueue {
     settings: RwLock<InterceptSettings>,
+    scope: RwLock<Scope>,
     pending: Mutex<BTreeMap<u64, Entry>>,
     next_id: AtomicU64,
 }
@@ -243,10 +247,30 @@ impl InterceptQueue {
     /// Whether [`hold`](Self::hold) would hold such a message now: it is
     /// then read in full rather than streamed.
     pub(crate) fn matches(&self, direction: Direction, request: &RequestInfo<'_>) -> bool {
+        let scope = self.scope.read().expect("not poisoned");
         self.settings
             .read()
             .expect("not poisoned")
-            .matches(direction, request)
+            .matches(direction, request, &scope)
+    }
+
+    /// The scope that `in_scope` rules use.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the lock.
+    #[must_use]
+    pub fn scope(&self) -> Scope {
+        self.scope.read().expect("not poisoned").clone()
+    }
+
+    /// Changes the scope that `in_scope` rules use, atomically.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the lock.
+    pub fn update_scope<R>(&self, change: impl FnOnce(&mut Scope) -> R) -> R {
+        change(&mut self.scope.write().expect("not poisoned"))
     }
 
     /// Holds the message if the rules for `direction` match `request`, and
@@ -262,7 +286,8 @@ impl InterceptQueue {
             // Listed while the settings are read-locked, so that `set` cannot
             // turn this direction off and release in between.
             let settings = self.settings.read().expect("not poisoned");
-            if !settings.matches(direction, request) {
+            let scope = self.scope.read().expect("not poisoned");
+            if !settings.matches(direction, request, &scope) {
                 return Verdict::Forward;
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -312,11 +337,15 @@ impl Drop for Unlist<'_> {
 mod tests {
     use super::*;
 
-    fn info<'a>(host: &'a str, method: &'a str, target: &'a str) -> RequestInfo<'a> {
+    fn info<'a>(host: &'a str, method: &'a str, path: &'a str) -> RequestInfo<'a> {
         RequestInfo {
-            host,
             method,
-            target,
+            target: ScopeTarget {
+                scheme: crate::Scheme::Https,
+                host,
+                port: 443,
+                path,
+            },
         }
     }
 
@@ -340,12 +369,30 @@ mod tests {
             hosts: vec!["*.test".parse().unwrap()],
             methods: vec!["POST".into()],
             path: Some(regex::Regex::new("^/api/").unwrap()),
+            in_scope: false,
         };
-        assert!(rules.matches(&info("a.test", "POST", "/api/x")));
-        assert!(!rules.matches(&info("a.test", "GET", "/api/x")));
-        assert!(!rules.matches(&info("other", "POST", "/api/x")));
-        assert!(!rules.matches(&info("a.test", "POST", "/x")));
-        assert!(InterceptRules::default().matches(&info("any", "ANY", "*")));
+        let all = Scope::default();
+        assert!(rules.matches(&info("a.test", "POST", "/api/x"), &all));
+        assert!(!rules.matches(&info("a.test", "GET", "/api/x"), &all));
+        assert!(!rules.matches(&info("other", "POST", "/api/x"), &all));
+        assert!(!rules.matches(&info("a.test", "POST", "/x"), &all));
+        assert!(InterceptRules::default().matches(&info("any", "ANY", "*"), &all));
+
+        let in_scope = InterceptRules {
+            in_scope: true,
+            ..InterceptRules::default()
+        };
+        let scope = Scope {
+            rules: vec![crate::ScopeRule {
+                exclude: false,
+                scheme: None,
+                host: "in.test".parse().unwrap(),
+                port: None,
+                path: None,
+            }],
+        };
+        assert!(in_scope.matches(&info("in.test", "GET", "/"), &scope));
+        assert!(!in_scope.matches(&info("out.test", "GET", "/"), &scope));
     }
 
     #[tokio::test]

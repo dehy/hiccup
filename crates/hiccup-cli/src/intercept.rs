@@ -15,7 +15,7 @@ use hiccup_control::api::{
 use serde_json::Value;
 
 use crate::Globals;
-use crate::instance;
+use crate::instance::{call_method as call, request, to_value};
 
 #[derive(Debug, Subcommand)]
 pub enum InterceptCommand {
@@ -75,6 +75,9 @@ pub struct OnArgs {
     /// Only for request targets matching this regular expression.
     #[arg(long, value_name = "REGEX")]
     path: Option<String>,
+    /// Only for what is in scope (see `hiccup scope`).
+    #[arg(long)]
+    in_scope: bool,
     /// Seconds a message may wait before --on-timeout applies. Default:
     /// forever.
     #[arg(long, value_name = "SECONDS")]
@@ -165,34 +168,6 @@ pub fn run(command: InterceptCommand, globals: &Globals) -> ExitCode {
     }
 }
 
-fn to_value<T: serde::Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).expect("API types serialize")
-}
-
-/// Calls `method`; prints the result with `human`, or as JSON.
-fn call(
-    globals: &Globals,
-    method: &'static str,
-    params: Value,
-    human: impl FnOnce(Value),
-) -> ExitCode {
-    let Some(result) = request(globals, method, params) else {
-        return ExitCode::FAILURE;
-    };
-    if globals.json {
-        crate::print_json(&result);
-    } else {
-        human(result);
-    }
-    ExitCode::SUCCESS
-}
-
-fn request(globals: &Globals, method: &'static str, params: Value) -> Option<Value> {
-    instance::call(globals, move |client| {
-        Box::pin(async move { client.call_value(method, params).await })
-    })
-}
-
 fn status(globals: &Globals) -> Option<InterceptStatus> {
     request(globals, method::INTERCEPT_STATUS, Value::Null)
         .map(|v| serde_json::from_value(v).expect("typed"))
@@ -206,6 +181,7 @@ fn on(args: &OnArgs, globals: &Globals) -> ExitCode {
         hosts: args.host.clone(),
         methods: args.method.clone(),
         path: args.path.clone(),
+        in_scope: args.in_scope,
     };
     let (requests, responses) = args.directions.select((true, false));
     if requests {
@@ -271,6 +247,9 @@ fn print_status(value: Value) {
             }
             if let Some(path) = &r.path {
                 parts.push(format!("path /{path}/"));
+            }
+            if r.in_scope {
+                parts.push("in scope".to_owned());
             }
             if parts.is_empty() {
                 "on (all)".to_owned()
