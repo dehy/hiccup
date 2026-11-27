@@ -11,5 +11,6 @@
 
 mod instance;
 mod params;
+mod project;
 
 pub use instance::Instance;

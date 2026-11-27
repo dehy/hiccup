@@ -2,23 +2,27 @@
 
 //! A running Hiccup instance.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hiccup_control::api::{
-    ExchangeRequestEvent, ExchangeResponseEvent, ForwardAllResult, ForwardParams, InstanceInfo,
-    InterceptResolvedEvent, InterceptSettingsParams, InterceptStatus, ItemParams, PendingItem,
-    PendingSummary, ProxyStartParams, ProxyStartResult, ProxyStatus, ScopeRemoveParams,
-    ScopeRuleParams, ScopeRules, ScopeTestParams, ScopeTestResult, method, notification,
+    ExchangeRequestEvent, ExchangeResponseEvent, ForwardAllResult, ForwardParams, HistoryItem,
+    HistoryListParams, HistoryPage, HistorySummary, InstanceInfo, InterceptResolvedEvent,
+    InterceptSettingsParams, InterceptStatus, ItemParams, PendingItem, PendingSummary,
+    ProxyStartParams, ProxyStartResult, ProxyStatus, ScopeRemoveParams, ScopeRuleParams,
+    ScopeRules, ScopeTestParams, ScopeTestResult, method, notification,
 };
 use hiccup_control::{API_VERSION, BoxFuture, ErrorCode, Handler, Notifier, RpcError};
 use hiccup_proxy::{
     AbsoluteTarget, CertificateAuthority, Direction, Exchange, InterceptError, InterceptQueue,
     Outcome, Pending, Proxy, QueueEvent, Scheme, Scope, ScopeTarget, Verdict,
 };
+use hiccup_store::{Filter, StoreError, Summary};
 use serde::Serialize;
+
+use crate::project::Project;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::{Mutex, watch};
@@ -38,6 +42,8 @@ pub struct Instance {
     intercept: Arc<InterceptQueue>,
     /// Events for connections that called `events.subscribe`.
     notifier: Notifier,
+    /// Where history is recorded, if anywhere; set once, at startup.
+    project: std::sync::OnceLock<Arc<Project>>,
 }
 
 struct RunningProxy {
@@ -94,7 +100,21 @@ impl Instance {
             proxy_running: watch::channel(false).0,
             intercept,
             notifier,
+            project: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Records history in the project file at `path` from now on (it is
+    /// created if needed).
+    ///
+    /// # Errors
+    ///
+    /// Fails if the project cannot be opened, or one already is.
+    pub fn open_project(&self, path: &Path) -> Result<(), String> {
+        let project = Project::open(path).map_err(|e| e.to_string())?;
+        self.project
+            .set(Arc::new(project))
+            .map_err(|_| "a project is already open".to_owned())
     }
 
     /// The events this instance sends to connections that called
@@ -125,6 +145,7 @@ impl Instance {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             api_version: API_VERSION.to_owned(),
             started_at: self.started_at,
+            project: self.project.get().map(|p| p.path.display().to_string()),
         }
     }
 
@@ -160,12 +181,16 @@ impl Instance {
         let exchanges = Arc::new(AtomicU64::new(0));
         let counter = exchanges.clone();
         let (on_request, on_response) = (self.notifier.clone(), self.notifier.clone());
+        let project = self.project.get().cloned();
         let proxy = Proxy::bind(config)
             .await
             .map_err(|e| failed(e.to_string()))?
             .with_intercept(self.intercept.clone())
             .with_observer(Arc::new(move |e: &Exchange| {
                 counter.fetch_add(1, Ordering::Relaxed);
+                if let Some(project) = &project {
+                    project.record(e);
+                }
                 on_response.notify(notification::EXCHANGE_RESPONSE, value(&response_event(e)));
             }))
             .with_request_observer(Arc::new(move |e: &Exchange| {
@@ -328,7 +353,64 @@ impl Instance {
     /// Stops the proxy if it runs, then cancels [`shutdown_token`](Self::shutdown_token).
     pub async fn shutdown(&self) {
         let _ = self.stop_proxy().await;
+        // The proxy is stopped: write what it recorded.
+        if let Some(project) = self.project.get().cloned() {
+            let _ = tokio::task::spawn_blocking(move || project.close()).await;
+        }
         self.shutdown.cancel();
+    }
+
+    fn project(&self) -> Result<Arc<Project>, RpcError> {
+        self.project.get().cloned().ok_or_else(|| {
+            RpcError::new(
+                ErrorCode::InvalidState,
+                "no project is open: start the instance with --project FILE",
+            )
+        })
+    }
+
+    async fn history_list(&self, params: HistoryListParams) -> Result<HistoryPage, RpcError> {
+        let limit = params.limit.unwrap_or(100);
+        if limit > 1000 {
+            return Err(RpcError::invalid_params("`limit` is above 1000"));
+        }
+        let store = self.project()?.store.clone();
+        let filter = Filter {
+            host: params.host,
+            method: params.method,
+            status: params.status,
+            mime: params.mime,
+            search: params.search.map(String::into_bytes),
+            scope: params.in_scope.then(|| self.intercept.scope()),
+        };
+        let before = params.before.map(|b| i64::try_from(b).unwrap_or(i64::MAX));
+        let items = blocking(move || {
+            store
+                .lock()
+                .expect("not poisoned")
+                .list(&filter, before, limit)
+        })
+        .await?;
+        Ok(HistoryPage {
+            items: items.iter().map(history_summary).collect(),
+        })
+    }
+
+    async fn history_show(&self, id: u64) -> Result<HistoryItem, RpcError> {
+        let store = self.project()?.store.clone();
+        let key = i64::try_from(id).unwrap_or(-1);
+        let record = blocking(move || store.lock().expect("not poisoned").get(key))
+            .await?
+            .ok_or_else(|| RpcError::invalid_params(format!("no recorded exchange {id}")))?;
+        let b64 = |b: &[u8]| data_encoding::BASE64.encode(b);
+        Ok(HistoryItem {
+            summary: history_summary(&record.summary),
+            received: b64(&record.received),
+            forwarded: b64(&record.forwarded),
+            interim: (!record.interim.is_empty()).then(|| b64(&record.interim)),
+            response: record.response.as_deref().map(b64),
+            delivered: record.delivered.as_deref().map(b64),
+        })
     }
 }
 
@@ -379,6 +461,11 @@ impl Handler for Instance {
                 method::INTERCEPT_FORWARD_ALL => reply(&ForwardAllResult {
                     forwarded: self.intercept.forward_all(),
                 }),
+                method::HISTORY_LIST => reply(&self.history_list(parse(params)?).await?),
+                method::HISTORY_SHOW => {
+                    let ItemParams { id } = parse(params)?;
+                    reply(&self.history_show(id).await?)
+                }
                 method::SCOPE_LIST => reply(&Self::scope_rules(&self.intercept.scope())),
                 method::SCOPE_ADD => reply(&self.add_scope_rule(&parse(params)?)?),
                 method::SCOPE_REMOVE => {
@@ -403,6 +490,38 @@ fn not_found(id: u64) -> RpcError {
         ErrorCode::InvalidState,
         format!("no held item {id} (it may have been resolved or timed out)"),
     )
+}
+
+/// Runs a store query off the async runtime.
+async fn blocking<T: Send + 'static>(
+    query: impl FnOnce() -> Result<T, StoreError> + Send + 'static,
+) -> Result<T, RpcError> {
+    tokio::task::spawn_blocking(query)
+        .await
+        .map_err(|e| RpcError::new(ErrorCode::Failed, e.to_string()))?
+        .map_err(|e| RpcError::new(ErrorCode::Failed, e.to_string()))
+}
+
+fn history_summary(s: &Summary) -> HistorySummary {
+    let ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    HistorySummary {
+        id: u64::try_from(s.id).unwrap_or(0),
+        started_ms: ms(s.started.duration_since(UNIX_EPOCH).unwrap_or_default()),
+        duration_ms: ms(s.duration),
+        client: s.client.clone(),
+        upstream: s.upstream.clone(),
+        tls: s.tls,
+        method: s.method.clone(),
+        target: s.target.clone(),
+        status: s.status,
+        mime: s.mime.clone(),
+        request_size: s.request_size,
+        response_size: s.response_size,
+        response_truncated: s.response_truncated,
+        request_edited: s.request_edited,
+        response_edited: s.response_edited,
+        error: s.error.clone(),
+    }
 }
 
 fn value<T: Serialize>(event: &T) -> Value {

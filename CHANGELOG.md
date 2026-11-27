@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- History recording. `--project FILE` makes an instance started by `hiccup serve` or `hiccup proxy start --foreground` record every exchange in that project file, which survives restarts. Exchanges are queued, so the proxy never waits on the disk; a queue that falls behind drops (with a warning) rather than slows the proxy.
+  - Control API: `history.list` (filters, newest first, paginated) and `history.show` (the exact bytes, base64-encoded). `instance.info` gives the open project.
+  - CLI: `hiccup history list|show|export`. `show --request` / `--response` write the exact bytes when redirected; `export` writes every matching exchange as one JSON object per line.
 - A project file another user created is refused, untouched (on Windows, by checking the file's owner before opening it). On Unix, a project is also refused if another user could swap it before it is opened: when it is a symbolic link, or in a directory others can write to (sticky directories like `/tmp` are fine).
 - Event stream. After `events.subscribe`, a control connection receives `exchange.request`, `exchange.response` (with the error, if any), `intercept.pending`, `intercept.resolved` and `proxy.state` events. Buffers are bounded: a subscriber that falls behind gets `events.lagged`, then is dropped. `hiccup events [--json] [--filter PREFIX]` streams them, escaping text from traffic on a terminal, and subscribes again after a lag.
   - `Exchange::id` ties a request to its completion; `Proxy::with_request_observer` is told of each request before it is held or forwarded. `InterceptQueue::with_listener` is told of every change to the queue.
@@ -19,7 +22,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `hiccup-store`: proxy history in a SQLite project file (`.hiccup`). Every exchange keeps its exact bytes (received, forwarded, interim, response, delivered), timings, TLS flag and edited flags. Raw messages live in a separate blob table, and schema migrations are tracked with `user_version`.
   - Newest-first pages filtered by host, method, status, media type prefix and byte search.
   - 10k exchanges: p95 under 50 ms to insert and to query (`cargo test --release -p hiccup-store -- --ignored`).
-  - Not yet wired to the instance; `--project` and `hiccup history` come with the CLI work.
 - `Exchange::started` and `Exchange::duration`.
 - Intercept queue. Matching requests and responses are held until they are forwarded, forwarded edited (the bytes are sent exactly as edited), or dropped. After an edited request, the upstream connection is not reused.
   - Rules per direction match the request's host patterns, methods and a path regex.

@@ -4,6 +4,7 @@
 
 mod ca;
 mod events;
+mod history;
 mod instance;
 mod intercept;
 mod proxy;
@@ -53,6 +54,12 @@ struct Cli {
     #[arg(long, value_name = "DIR", env = "HICCUP_RUNTIME_DIR", global = true)]
     runtime_dir: Option<PathBuf>,
 
+    /// The project file (`.hiccup`) an instance started by this command
+    /// (`serve`, `proxy start --foreground`) records history in; created if
+    /// needed. Without it, history is not recorded.
+    #[arg(long, value_name = "FILE", global = true)]
+    project: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -72,6 +79,9 @@ enum Command {
     /// Which URLs are being tested.
     #[command(subcommand)]
     Scope(scope::ScopeCommand),
+    /// Recorded exchanges, from the instance's project.
+    #[command(subcommand)]
+    History(history::HistoryCommand),
     /// Stream what the instance does, live: requests, responses, held
     /// messages, proxy state. With --json, one JSON object per line.
     Events(events::EventsArgs),
@@ -89,6 +99,7 @@ pub struct Globals {
     instance: Option<String>,
     data_dir: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
+    project: Option<PathBuf>,
 }
 
 impl Globals {
@@ -122,6 +133,7 @@ fn main() -> ExitCode {
         instance: cli.instance,
         data_dir: cli.data_dir,
         runtime_dir: cli.runtime_dir,
+        project: cli.project,
     };
     match cli.command {
         Command::Serve => instance::serve(&globals),
@@ -129,6 +141,7 @@ fn main() -> ExitCode {
         Command::Intercept(command) => intercept::run(command, &globals),
         Command::Scope(command) => scope::run(command, &globals),
         Command::Events(args) => events::run(&args, &globals),
+        Command::History(command) => history::run(command, &globals),
         Command::Instance(command) => instance::run(command, &globals),
         Command::Ca(command) => match globals.data_dir() {
             Some(dir) => ca::run(command, &dir, globals.json),

@@ -514,6 +514,7 @@ dependencies = [
  "data-encoding",
  "hiccup-control",
  "hiccup-proxy",
+ "hiccup-store",
  "regex",
  "serde",
  "serde_json",

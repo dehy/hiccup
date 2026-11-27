@@ -19,6 +19,7 @@ hiccup-control = { path = "crates/hiccup-control" }
 hiccup-core = { path = "crates/hiccup-core" }
 hiccup-http = { path = "crates/hiccup-http" }
 hiccup-proxy = { path = "crates/hiccup-proxy" }
+hiccup-store = { path = "crates/hiccup-store" }
 
 # External crates
 bytes = "1"

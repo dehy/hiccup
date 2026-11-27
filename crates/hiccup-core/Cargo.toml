@@ -13,6 +13,7 @@ publish.workspace = true
 data-encoding.workspace = true
 hiccup-control.workspace = true
 hiccup-proxy.workspace = true
+hiccup-store.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
