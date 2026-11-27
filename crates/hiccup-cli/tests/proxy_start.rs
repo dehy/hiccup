@@ -40,8 +40,30 @@ fn foreground_proxy_forwards_a_request() {
     });
 
     let data = tempfile::tempdir().unwrap();
+    // Any PEM certificate and key will do for --client-cert: use the CA's.
+    assert!(
+        hiccup(&data)
+            .args(["ca", "info"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let cert = data.path().join("ca-cert.pem");
+    let key = data.path().join("ca-key.pem");
+    let client_cert = format!("*.test={},{}", cert.display(), key.display());
     let mut child = hiccup(&data)
         .args(["proxy", "start", "--foreground", "--listen", "127.0.0.1:0"])
+        // Every upstream option, to check that they parse and start.
+        .args(["--resolve", "origin.test=127.0.0.1", "--verify-upstream"])
+        .args(["--upstream-tls-min", "1.3", "--upstream-tls-max", "1.3"])
+        .args([
+            "--upstream-sni",
+            "*.test=sni.example",
+            "--client-cert",
+            &client_cert,
+        ])
+        .args(["--connect-timeout", "2.5", "--read-timeout", "5"])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -65,7 +87,14 @@ fn foreground_proxy_forwards_a_request() {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     client
-        .write_all(format!("GET http://{origin_addr}/ HTTP/1.1\r\n\r\n").as_bytes())
+        // `origin.test` exists only through --resolve.
+        .write_all(
+            format!(
+                "GET http://origin.test:{}/ HTTP/1.1\r\n\r\n",
+                origin_addr.port()
+            )
+            .as_bytes(),
+        )
         .unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
@@ -77,4 +106,35 @@ fn foreground_proxy_forwards_a_request() {
         "{}",
         String::from_utf8_lossy(&response)
     );
+}
+
+#[test]
+fn invalid_upstream_options_are_rejected() {
+    let data = tempfile::tempdir().unwrap();
+    for (args, expected, code) in [
+        (&["--upstream-tls-min", "1.1"][..], "not supported", 2),
+        (&["--resolve", "host=not-an-ip"], "invalid IP address", 2),
+        (&["--resolve", "no-equals"], "expected HOST=VALUE", 2),
+        (&["--upstream-sni", "*.=x"], "invalid host pattern", 2),
+        (
+            &["--client-cert", "h=missing.pem"],
+            "cannot read missing.pem",
+            2,
+        ),
+        (&["--connect-timeout", "0"], "positive number of seconds", 2),
+        (
+            &["--upstream-tls-min", "1.3", "--upstream-tls-max", "1.2"],
+            "no TLS version",
+            1,
+        ),
+    ] {
+        let out = hiccup(&data)
+            .args(["proxy", "start", "--foreground", "--listen", "127.0.0.1:0"])
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {stderr}");
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
 }

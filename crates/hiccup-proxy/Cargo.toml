@@ -15,6 +15,7 @@ hiccup-http.workspace = true
 rcgen.workspace = true
 ring.workspace = true
 rustls.workspace = true
+rustls-platform-verifier.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

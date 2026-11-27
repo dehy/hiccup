@@ -11,7 +11,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use hiccup_proxy::{HostPattern, Proxy, ProxyConfig};
+use std::net::IpAddr;
+use std::time::Duration;
+
+use hiccup_proxy::{ClientCert, HostPattern, Proxy, ProxyConfig, TlsVersion, UpstreamConfig};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -71,6 +74,106 @@ struct StartArgs {
     /// host. Repeat for several patterns.
     #[arg(long, value_name = "PATTERN")]
     tls_passthrough: Vec<HostPattern>,
+
+    /// Verify upstream server certificates against the OS trust store.
+    ///
+    /// Off by default, so that targets with self-signed or invalid
+    /// certificates can be tested.
+    #[arg(long, help_heading = "Upstream")]
+    verify_upstream: bool,
+
+    /// Lowest TLS version offered to servers: 1.2 or 1.3.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        default_value = "1.2",
+        help_heading = "Upstream"
+    )]
+    upstream_tls_min: TlsVersion,
+
+    /// Highest TLS version offered to servers: 1.2 or 1.3.
+    #[arg(
+        long,
+        value_name = "VERSION",
+        default_value = "1.3",
+        help_heading = "Upstream"
+    )]
+    upstream_tls_max: TlsVersion,
+
+    /// Send NAME as SNI (and verify against it) for matching hosts.
+    ///
+    /// HOST is a pattern like in --tls-passthrough. Repeat for several hosts;
+    /// the first match applies.
+    #[arg(long, value_name = "HOST=NAME", value_parser = parse_sni, help_heading = "Upstream")]
+    upstream_sni: Vec<(HostPattern, String)>,
+
+    /// Connect to IP instead of resolving matching hosts. Repeatable.
+    #[arg(long, value_name = "HOST=IP", value_parser = parse_resolve, help_heading = "Upstream")]
+    resolve: Vec<(HostPattern, IpAddr)>,
+
+    /// Present a client certificate to matching hosts. Repeatable.
+    ///
+    /// CERT is a PEM chain, leaf first. KEY is a PEM private key; without
+    /// it, the key is read from CERT.
+    #[arg(
+        long,
+        value_name = "HOST=CERT[,KEY]",
+        value_parser = parse_client_cert,
+        help_heading = "Upstream"
+    )]
+    client_cert: Vec<(HostPattern, ClientCert)>,
+
+    /// Seconds to wait for an upstream connection, including its TLS
+    /// handshake.
+    #[arg(long, value_name = "SECONDS", default_value = "10", value_parser = parse_seconds, help_heading = "Upstream")]
+    connect_timeout: Duration,
+
+    /// Seconds to wait for data while a message is being received, from
+    /// the client or a server.
+    #[arg(long, value_name = "SECONDS", default_value = "60", value_parser = parse_seconds)]
+    read_timeout: Duration,
+}
+
+/// Splits `HOST=VALUE` and parses the host pattern.
+fn split_rule(s: &str) -> Result<(HostPattern, &str), String> {
+    let (host, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected HOST=VALUE, got {s:?}"))?;
+    Ok((host.parse()?, value))
+}
+
+fn parse_sni(s: &str) -> Result<(HostPattern, String), String> {
+    let (host, name) = split_rule(s)?;
+    if name.is_empty() {
+        return Err("the server name is empty".to_owned());
+    }
+    Ok((host, name.to_owned()))
+}
+
+fn parse_resolve(s: &str) -> Result<(HostPattern, IpAddr), String> {
+    let (host, ip) = split_rule(s)?;
+    let ip = ip
+        .trim_matches(|c| c == '[' || c == ']')
+        .parse()
+        .map_err(|_| format!("invalid IP address {ip:?}"))?;
+    Ok((host, ip))
+}
+
+fn parse_client_cert(s: &str) -> Result<(HostPattern, ClientCert), String> {
+    let (host, files) = split_rule(s)?;
+    let (cert_path, key_path) = files.split_once(',').unwrap_or((files, files));
+    let read = |path: &str| std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"));
+    let cert = ClientCert::from_pem(&read(cert_path)?, &read(key_path)?)
+        .map_err(|e| format!("{files}: {e}"))?;
+    Ok((host, cert))
+}
+
+fn parse_seconds(s: &str) -> Result<Duration, String> {
+    s.parse::<f64>()
+        .ok()
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
+        .map(Duration::from_secs_f64)
+        .ok_or_else(|| format!("expected a positive number of seconds, got {s:?}"))
 }
 
 fn main() -> ExitCode {
@@ -132,10 +235,25 @@ fn proxy_start(args: StartArgs, data_dir: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let verification = if args.verify_upstream {
+        "Upstream certificates are verified against the OS trust store."
+    } else {
+        "WARNING: upstream certificates are not verified (use --verify-upstream)."
+    };
     runtime.block_on(async {
         let config = ProxyConfig {
             listen: args.listen,
             tls_passthrough: args.tls_passthrough,
+            connect_timeout: args.connect_timeout,
+            read_timeout: args.read_timeout,
+            upstream: UpstreamConfig {
+                verify: args.verify_upstream,
+                tls_min: args.upstream_tls_min,
+                tls_max: args.upstream_tls_max,
+                sni: args.upstream_sni,
+                resolve: args.resolve,
+                client_certs: args.client_cert,
+            },
             ..ProxyConfig::default()
         };
         let proxy = match Proxy::bind(config)
@@ -153,10 +271,10 @@ fn proxy_start(args: StartArgs, data_dir: &std::path::Path) -> ExitCode {
             eprintln!("Hiccup proxy listening on http://{addr}");
         }
         eprintln!(
-            "HTTPS is intercepted with the Hiccup CA ({}). Upstream certificates are not \
-             verified.",
+            "HTTPS is intercepted with the Hiccup CA ({}).",
             ca::INSTALL_GUIDE
         );
+        eprintln!("{verification}");
         eprintln!("Press Ctrl+C to stop.");
 
         let shutdown = CancellationToken::new();

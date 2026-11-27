@@ -25,6 +25,7 @@ dirs = "7"
 proptest = "1"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 ring = "0.17"
+rustls-platform-verifier = "0.7"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"
 thiserror = "2"
