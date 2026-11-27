@@ -181,7 +181,10 @@ impl Store {
         // only. SQLite gives its -wal and -shm files the same mode.
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(
-            std::fs::OpenOptions::new().write(true).create(true),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false),
             0o600,
         )
         .open(path)?;
@@ -194,9 +197,11 @@ impl Store {
         // owner, must be refused before anything is written to it.
         #[cfg(windows)]
         {
+            // Never truncate: an existing project keeps its history.
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(path)?;
             if !owner::is_ours(path)? {
                 return Err(StoreError::Unsafe {
