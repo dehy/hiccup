@@ -56,6 +56,10 @@ pub struct Exchange {
     /// The final response as received from upstream, or `None` if the
     /// exchange failed before one arrived.
     pub response: Option<Response>,
+    /// Whether `response` holds only the start of its body. The client got
+    /// all of it, but a streamed body is kept up to
+    /// [`ProxyConfig::max_kept_body`](crate::ProxyConfig::max_kept_body).
+    pub response_truncated: bool,
     /// The bytes sent to the client instead of `response`, when the user
     /// edited it.
     pub delivered: Option<Bytes>,

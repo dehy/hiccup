@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Response bodies are relayed as they arrive (server-sent events, downloads, video), instead of being read in full first. An exchange keeps up to `ProxyConfig::max_kept_body` (8 MiB) of the body and records `response_truncated` beyond that, which the store saves too. A response held in the intercept queue is still read in full. Request bodies are still read in full (#55).
 - `hiccup proxy start` warns when the proxy listens beyond loopback: anyone who can reach it can use it without authentication.
 - `hiccup-store`: proxy history in a SQLite project file (`.hiccup`). Every exchange keeps its exact bytes (received, forwarded, interim, response, delivered), timings, TLS flag and edited flags. Raw messages live in a separate blob table, and schema migrations are tracked with `user_version`.
   - Newest-first pages filtered by host, method, status, media type prefix and byte search.
