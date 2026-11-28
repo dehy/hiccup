@@ -2,6 +2,8 @@
 
 //! A running Hiccup instance.
 
+mod repeater;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +46,8 @@ pub struct Instance {
     notifier: Notifier,
     /// Where history is recorded, if anywhere; set once, at startup.
     project: std::sync::OnceLock<Arc<Project>>,
+    /// One sender per repeater tab.
+    senders: std::sync::Mutex<std::collections::HashMap<i64, Arc<hiccup_proxy::Sender>>>,
 }
 
 struct RunningProxy {
@@ -101,6 +105,7 @@ impl Instance {
             intercept,
             notifier,
             project: std::sync::OnceLock::new(),
+            senders: std::sync::Mutex::default(),
         })
     }
 
@@ -465,6 +470,27 @@ impl Handler for Instance {
                 method::HISTORY_SHOW => {
                     let ItemParams { id } = parse(params)?;
                     reply(&self.history_show(id).await?)
+                }
+                method::REPEATER_LIST => reply(&self.repeater_list().await?),
+                method::REPEATER_NEW => reply(&self.repeater_new(parse(params)?).await?),
+                method::REPEATER_SHOW => {
+                    let ItemParams { id } = parse(params)?;
+                    reply(&self.repeater_show(id).await?)
+                }
+                method::REPEATER_UPDATE => reply(&self.repeater_update(parse(params)?).await?),
+                method::REPEATER_CLOSE => {
+                    let ItemParams { id } = parse(params)?;
+                    self.repeater_close(id).await?;
+                    reply(&serde_json::json!({}))
+                }
+                method::REPEATER_SEND => {
+                    let ItemParams { id } = parse(params)?;
+                    reply(&self.repeater_send(id).await?)
+                }
+                method::REPEATER_HISTORY => reply(&self.repeater_history(parse(params)?).await?),
+                method::REPEATER_HISTORY_SHOW => {
+                    let ItemParams { id } = parse(params)?;
+                    reply(&self.repeater_history_show(id).await?)
                 }
                 method::SCOPE_LIST => reply(&Self::scope_rules(&self.intercept.scope())),
                 method::SCOPE_ADD => reply(&self.add_scope_rule(&parse(params)?)?),

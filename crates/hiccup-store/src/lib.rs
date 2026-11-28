@@ -16,6 +16,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 #[cfg(windows)]
 mod owner;
+mod repeater;
+
+pub use repeater::{RepeaterSend, Tab};
 
 /// Schema migrations, in order. The database's `user_version` counts those
 /// applied. Never edit one that has shipped: append a new one.
@@ -59,6 +62,33 @@ const MIGRATIONS: &[&str] = &[
     "
     -- The request blobs hold only the start of the body.
     ALTER TABLE exchanges ADD COLUMN request_truncated INTEGER NOT NULL DEFAULT 0;
+",
+    "
+    CREATE TABLE repeater_tabs (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        tls INTEGER NOT NULL,
+        request BLOB NOT NULL,
+        options TEXT NOT NULL
+    );
+    -- One row per request sent, redirect hops included.
+    CREATE TABLE repeater_sends (
+        id INTEGER PRIMARY KEY,
+        tab INTEGER NOT NULL REFERENCES repeater_tabs(id) ON DELETE CASCADE,
+        started_ms INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        tls INTEGER NOT NULL,
+        status INTEGER,
+        error TEXT,
+        details TEXT NOT NULL,
+        request BLOB NOT NULL,
+        response BLOB NOT NULL
+    );
+    CREATE INDEX repeater_sends_by_tab ON repeater_sends (tab, id);
 ",
 ];
 
