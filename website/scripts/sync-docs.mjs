@@ -126,8 +126,8 @@ const adrs = [...pages]
     const statusLine = lines.find((l) => l.includes("**Status:**")) ?? "";
     const status = statusLine.slice(statusLine.indexOf("**Status:**") + "**Status:**".length).trim();
     const number = slug.slice("adr/".length, "adr/".length + 4);
-    const plainStatus = status.replaceAll(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-    return `| [${number}](${pageUrl(slug)}) | ${title} | ${plainStatus} |`;
+    const linkedStatus = status.replaceAll(/\]\(([^)\s]+)\)/g, (_, target) => `](${rewriteTarget(target, from)})`);
+    return `| [${number}](${pageUrl(slug)}) | ${title} | ${linkedStatus} |`;
   });
 writeFileSync(
   join(out, "adr", "index.md"),
