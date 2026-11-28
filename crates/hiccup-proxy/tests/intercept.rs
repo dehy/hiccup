@@ -164,6 +164,34 @@ async fn an_edited_request_is_sent_exactly_as_edited() {
 }
 
 #[tokio::test]
+async fn a_held_request_is_read_whole_first() {
+    let (origin, received) = origin().await;
+    let h = Harness::start(requests()).await;
+    let mut client = TcpStream::connect(h.proxy).await.unwrap();
+    let head = format!(
+        "POST http://{origin}/form HTTP/1.1\r\nContent-Length: 9\r\nConnection: close\r\n\r\n"
+    );
+    client
+        .write_all(format!("{head}first").as_bytes())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        h.queue.list().is_empty(),
+        "not held before the body is whole"
+    );
+    client.write_all(b"last").await.unwrap();
+
+    let held = h.next_pending().await;
+    assert!(held.raw.ends_with(b"\r\n\r\nfirstlast"), "editable whole");
+    h.queue.resolve(held.id, Verdict::Forward).unwrap();
+    let mut out = Vec::new();
+    client.read_to_end(&mut out).await.unwrap();
+    assert!(out.ends_with(b"origin"));
+    assert!(received.lock().unwrap()[0].starts_with(b"POST /form "));
+}
+
+#[tokio::test]
 async fn a_dropped_request_never_reaches_the_origin() {
     let (origin, received) = origin().await;
     let h = Harness::start(requests()).await;

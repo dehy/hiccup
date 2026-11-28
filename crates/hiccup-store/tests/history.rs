@@ -27,6 +27,7 @@ fn exchange(upstream: &str, request: &[u8], response: Option<&[u8]>) -> Exchange
         forwarded: Bytes::copy_from_slice(request),
         received,
         modifications: Vec::new(),
+        request_truncated: false,
         interim: Vec::new(),
         response,
         response_truncated: false,
@@ -48,6 +49,7 @@ fn exact_bytes_survive_a_reopen() {
     e.delivered = Some(Bytes::from_static(b"HTTP/1.1 418 Teapot\r\n\r\n"));
     e.modifications = vec![Modification::RequestEdited, Modification::ResponseEdited];
     e.response_truncated = true;
+    e.request_truncated = true;
     let id = Store::open(&path).unwrap().insert(&e).unwrap();
 
     let store = Store::open(&path).unwrap();
@@ -63,7 +65,7 @@ fn exact_bytes_survive_a_reopen() {
     assert_eq!(s.mime.as_deref(), Some("text/html"));
     assert_eq!(s.duration, Duration::from_millis(12));
     assert!(s.request_edited && s.response_edited);
-    assert!(s.response_truncated);
+    assert!(s.response_truncated && s.request_truncated);
     assert_eq!(
         store.list(&Filter::default(), None, 10).unwrap(),
         [r.summary]

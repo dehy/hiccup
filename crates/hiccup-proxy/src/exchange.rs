@@ -54,6 +54,10 @@ pub struct Exchange {
     pub forwarded: Bytes,
     /// Changes between `received` and `forwarded`.
     pub modifications: Vec<Modification>,
+    /// Whether `received` and `forwarded` hold only the start of the request
+    /// body. Upstream got all of it, but a streamed body is kept up to
+    /// [`ProxyConfig::max_kept_body`](crate::ProxyConfig::max_kept_body).
+    pub request_truncated: bool,
     /// Interim (1xx) responses relayed before the final response.
     pub interim: Vec<Response>,
     /// The final response as received from upstream, or `None` if the

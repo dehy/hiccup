@@ -26,10 +26,11 @@ pub struct ProxyConfig {
     pub read_timeout: Duration,
     /// How long in-flight exchanges may continue after shutdown is requested.
     pub shutdown_grace: Duration,
-    /// How many bytes of a response body an [`Exchange`](crate::Exchange)
-    /// keeps. Bodies are relayed to the client as they arrive, whatever
-    /// their size; beyond this, the rest is not kept
-    /// ([`Exchange::response_truncated`](crate::Exchange::response_truncated)).
+    /// How many bytes of a request or response body an
+    /// [`Exchange`](crate::Exchange) keeps. Bodies are relayed as they
+    /// arrive, whatever their size; beyond this, the rest is not kept
+    /// ([`Exchange::request_truncated`](crate::Exchange::request_truncated),
+    /// [`Exchange::response_truncated`](crate::Exchange::response_truncated)).
     pub max_kept_body: usize,
     /// Hosts whose `CONNECT` tunnels are relayed without TLS interception,
     /// for example clients that pin certificates. Only relevant when a CA is

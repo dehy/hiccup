@@ -56,6 +56,10 @@ const MIGRATIONS: &[&str] = &[
     -- The response blob holds only the start of the body.
     ALTER TABLE exchanges ADD COLUMN response_truncated INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+    -- The request blobs hold only the start of the body.
+    ALTER TABLE exchanges ADD COLUMN request_truncated INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// Why a store operation failed.
@@ -125,8 +129,11 @@ pub struct Summary {
     pub status: Option<u16>,
     /// The response's media type, lowercase, without parameters.
     pub mime: Option<String>,
-    /// Size of the request as received, in bytes.
+    /// Size of the request as kept, in bytes.
     pub request_size: u64,
+    /// Whether only the start of the request body was kept (it was relayed
+    /// in full).
+    pub request_truncated: bool,
     /// Size of the response as kept, in bytes.
     pub response_size: Option<u64>,
     /// Whether only the start of the response body was kept (it was relayed
@@ -258,9 +265,9 @@ impl Store {
             "INSERT INTO exchanges (started_ms, duration_ms, client, upstream, host, tls, method,
                  target, status, mime, request_size, response_size, request_edited,
                  response_edited, error, request_blob, forwarded_blob, interim_blob,
-                 response_blob, delivered_blob, response_truncated)
+                 response_blob, delivered_blob, response_truncated, request_truncated)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21)",
+                 ?18, ?19, ?20, ?21, ?22)",
         )?
         .execute(params![
             millis(
@@ -292,6 +299,7 @@ impl Store {
             response_blob,
             delivered_blob,
             exchange.response_truncated,
+            exchange.request_truncated,
         ])?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
@@ -382,17 +390,19 @@ impl Store {
                  FROM exchanges e WHERE e.id = ?1"
             ))?
             .query_row([id], |row| {
+                // The blobs come after the summary columns.
+                let first = SUMMARY.split(',').count();
                 let bytes = |i: usize| -> rusqlite::Result<Option<Bytes>> {
-                    Ok(row.get::<_, Option<Vec<u8>>>(i)?.map(Bytes::from))
+                    Ok(row.get::<_, Option<Vec<u8>>>(first + i)?.map(Bytes::from))
                 };
-                let received = bytes(17)?.unwrap_or_default();
+                let received = bytes(0)?.unwrap_or_default();
                 Ok(Record {
                     summary: summary(row)?,
-                    forwarded: bytes(18)?.unwrap_or_else(|| received.clone()),
+                    forwarded: bytes(1)?.unwrap_or_else(|| received.clone()),
                     received,
-                    interim: bytes(19)?.unwrap_or_default(),
-                    response: bytes(20)?,
-                    delivered: bytes(21)?,
+                    interim: bytes(2)?.unwrap_or_default(),
+                    response: bytes(3)?,
+                    delivered: bytes(4)?,
                 })
             })
             .optional()?;
@@ -403,7 +413,7 @@ impl Store {
 /// The columns [`summary`] reads, in order.
 const SUMMARY: &str = "e.id, e.started_ms, e.duration_ms, e.client, e.upstream, e.host, e.tls,
     e.method, e.target, e.status, e.mime, e.request_size, e.response_size, e.response_truncated,
-    e.request_edited, e.response_edited, e.error";
+    e.request_edited, e.response_edited, e.error, e.request_truncated";
 
 fn summary(row: &Row<'_>) -> rusqlite::Result<Summary> {
     let ms = |i| row.get::<_, u64>(i).map(Duration::from_millis);
@@ -420,6 +430,7 @@ fn summary(row: &Row<'_>) -> rusqlite::Result<Summary> {
         status: row.get(9)?,
         mime: row.get(10)?,
         request_size: row.get(11)?,
+        request_truncated: row.get(17)?,
         response_size: row.get(12)?,
         response_truncated: row.get(13)?,
         request_edited: row.get(14)?,
