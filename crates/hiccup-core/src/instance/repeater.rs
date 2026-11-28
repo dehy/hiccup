@@ -222,9 +222,9 @@ impl Instance {
 
     /// The tab's sender: one per tab, so that a kept connection serves the
     /// tab that opened it.
-    // shortcut: the default upstream options (no verification, no SNI,
-    // `--resolve` or client certificate rules); take the tab's own when the
-    // CLI exposes them (#22).
+    // shortcut: the default upstream options (certificates verified; no SNI,
+    // `--resolve` or client certificate rules, and no way to accept an
+    // invalid certificate); take the tab's own when the CLI exposes them (#22).
     fn sender(&self, tab: i64) -> Result<Arc<Sender>, RpcError> {
         let mut senders = self.senders.lock().expect("not poisoned");
         if let Some(sender) = senders.get(&tab) {
