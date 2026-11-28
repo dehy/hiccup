@@ -32,7 +32,7 @@ Errors are always written to standard error; results go to standard output (as J
 |-----|-------------|---------|
 | `project` | `--project` | `hiccup config set project ~/work/acme.hiccup` |
 | `proxy.listen` | `proxy start --listen` (comma-separated) | `hiccup config set proxy.listen 127.0.0.1:8081` |
-| `proxy.verify-upstream` | `proxy start --verify-upstream` | `hiccup config set proxy.verify-upstream true` |
+| `proxy.verify-upstream` | `proxy start --no-verify-upstream` (default `true`: certificates are verified) | `hiccup config set proxy.verify-upstream false` |
 
 `hiccup config unset KEY` goes back to the built-in default.
 

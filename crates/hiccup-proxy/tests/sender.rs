@@ -87,8 +87,16 @@ fn target(addr: SocketAddr, tls: bool) -> SendTarget {
     }
 }
 
+/// The test origins have self-signed certificates.
+fn insecure() -> UpstreamConfig {
+    UpstreamConfig {
+        verify: false,
+        ..UpstreamConfig::default()
+    }
+}
+
 fn sender() -> Sender {
-    Sender::new(UpstreamConfig::default()).unwrap()
+    Sender::new(insecure()).unwrap()
 }
 
 /// Malformed on purpose: a bare LF, a space before the colon, a lowercase
@@ -128,7 +136,7 @@ async fn the_exact_bytes_are_sent_to_the_target_whatever_the_host_header() {
 #[tokio::test]
 async fn tls_uses_the_upstream_options() {
     let (addr, captured) = tls_server(b"HTTP/1.1 204 No Content\r\n\r\n").await;
-    let mut upstream = UpstreamConfig::default();
+    let mut upstream = insecure();
     upstream
         .sni
         .push(("*".parse().unwrap(), "origin.test".to_owned()));

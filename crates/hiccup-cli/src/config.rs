@@ -22,7 +22,7 @@ const KEYS: &[(&str, &str)] = &[
     ),
     (
         "proxy.verify-upstream",
-        "whether `proxy start` verifies upstream certificates: true or false (--verify-upstream)",
+        "whether `proxy start` verifies upstream certificates: true (default) or false (--no-verify-upstream)",
     ),
 ];
 
@@ -104,7 +104,7 @@ impl Config {
         self.0
             .get("proxy.verify-upstream")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 }
 
@@ -242,7 +242,7 @@ mod tests {
         let mut config = Config::default();
         assert_eq!(
             (config.project(), config.listen(), config.verify_upstream()),
-            (None, Vec::new(), false)
+            (None, Vec::new(), true)
         );
         config.0.insert(
             "proxy.listen".into(),
@@ -250,12 +250,12 @@ mod tests {
         );
         config
             .0
-            .insert("proxy.verify-upstream".into(), Value::Bool(true));
+            .insert("proxy.verify-upstream".into(), Value::Bool(false));
         assert_eq!(
             config.listen(),
             ["127.0.0.1:1".parse::<SocketAddr>().unwrap()]
         );
-        assert!(config.verify_upstream());
+        assert!(!config.verify_upstream());
         assert_eq!(show(&config.0["proxy.listen"]), "127.0.0.1:1");
     }
 }

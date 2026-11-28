@@ -38,6 +38,6 @@ Out of scope:
 
 - vulnerabilities in **target applications** you test with Hiccup;
 - issues that require an already-compromised local user account;
-- the deliberately insecure upstream defaults that pentesting needs, such as disabled upstream certificate verification. These are documented, and Hiccup shows a warning when they are active.
+- insecure upstream options that pentesting needs and that you turn on yourself, such as `--no-verify-upstream`. They are off by default, documented, and Hiccup shows a warning when they are active.
 
 Please only test against systems you own or are authorized to test.

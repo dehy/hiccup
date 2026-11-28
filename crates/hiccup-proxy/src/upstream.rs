@@ -15,8 +15,8 @@ use crate::HostPattern;
 /// rule applies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpstreamConfig {
-    /// Verify server certificates against the OS trust store. Off by
-    /// default: testing targets often have self-signed or invalid
+    /// Verify server certificates against the OS trust store. On by
+    /// default; turn it off to test targets with self-signed or invalid
     /// certificates.
     pub verify: bool,
     /// Lowest TLS version offered to servers.
@@ -33,10 +33,10 @@ pub struct UpstreamConfig {
 }
 
 impl Default for UpstreamConfig {
-    /// No verification, TLS 1.2 to 1.3, no per-host rules.
+    /// Verification on, TLS 1.2 to 1.3, no per-host rules.
     fn default() -> Self {
         Self {
-            verify: false,
+            verify: true,
             tls_min: TlsVersion::Tls12,
             tls_max: TlsVersion::Tls13,
             sni: Vec::new(),

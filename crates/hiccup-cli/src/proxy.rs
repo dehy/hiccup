@@ -47,13 +47,14 @@ pub struct StartArgs {
     #[arg(long, value_name = "PATTERN")]
     tls_passthrough: Vec<HostPattern>,
 
-    /// Verify upstream server certificates against the OS trust store.
+    /// Don't verify upstream server certificates, to test targets with
+    /// self-signed or invalid certificates. Anyone on the network path can
+    /// then read and change the traffic.
     ///
-    /// Off by default, so that targets with self-signed or invalid
-    /// certificates can be tested; `proxy.verify-upstream` (see
-    /// `hiccup config`) changes the default.
+    /// Certificates are verified against the OS trust store by default;
+    /// `proxy.verify-upstream false` (see `hiccup config`) changes the default.
     #[arg(long, help_heading = "Upstream")]
-    verify_upstream: bool,
+    no_verify_upstream: bool,
 
     /// Lowest TLS version offered to servers: 1.2 or 1.3.
     #[arg(
@@ -126,7 +127,7 @@ impl StartArgs {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
-            verify_upstream: self.verify_upstream || config.verify_upstream(),
+            verify_upstream: !self.no_verify_upstream && config.verify_upstream(),
             upstream_tls_min: Some(self.upstream_tls_min.to_string()),
             upstream_tls_max: Some(self.upstream_tls_max.to_string()),
             upstream_sni: self.upstream_sni.iter().map(rule).collect(),
@@ -266,7 +267,9 @@ fn print_started(result: &ProxyStartResult) {
     if result.proxy.verify_upstream {
         eprintln!("Upstream certificates are verified against the OS trust store.");
     } else {
-        eprintln!("WARNING: upstream certificates are not verified (use --verify-upstream).");
+        eprintln!(
+            "WARNING: upstream certificates are not verified: anyone on the network path can read and change the traffic."
+        );
     }
 }
 
