@@ -140,6 +140,58 @@ fn listening_beyond_loopback_warns() {
     assert!(!warned("127.0.0.1:0"));
 }
 
+/// The start lines of a foreground proxy, then stops it.
+fn start_lines(data: &tempfile::TempDir, args: &[&str]) -> String {
+    let mut child = hiccup(data)
+        .args(["proxy", "start", "--foreground"])
+        .args(args)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut lines = String::new();
+    while !lines.contains("Press Ctrl+C") {
+        assert!(stderr.read_line(&mut lines).unwrap() > 0, "{lines}");
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    lines
+}
+
+#[test]
+fn saved_defaults_apply_and_flags_win() {
+    let data = tempfile::tempdir().unwrap();
+    let config = |args: &[&str]| {
+        let out = hiccup(&data).arg("config").args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    };
+    config(&["set", "proxy.listen", "127.0.0.1:0"]);
+    config(&["set", "proxy.verify-upstream", "true"]);
+    let lines = start_lines(&data, &[]);
+    assert!(lines.contains("listening on http://127.0.0.1:"), "{lines}");
+    assert!(
+        lines.contains("Upstream certificates are verified"),
+        "{lines}"
+    );
+
+    // A flag given wins over the saved default.
+    let lines = start_lines(&data, &["--listen", "[::1]:0"]);
+    assert!(lines.contains("listening on http://[::1]:"), "{lines}");
+
+    config(&["unset", "proxy.verify-upstream"]);
+    let lines = start_lines(&data, &[]);
+    assert!(
+        lines.contains("WARNING: upstream certificates are not verified"),
+        "{lines}"
+    );
+
+    let out = hiccup(&data)
+        .args(["config", "set", "colour", "red"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "a usage error");
+}
+
 #[test]
 fn invalid_upstream_options_are_rejected() {
     let data = tempfile::tempdir().unwrap();

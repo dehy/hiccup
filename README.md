@@ -78,6 +78,8 @@ hiccup history show 42 --response > response.http   # the exact bytes
 hiccup history export > acme.jsonl                  # every exchange, in full
 ```
 
+Every command takes `--json`. Exit codes, saved defaults (`hiccup config`), shell completions and man pages are described in [docs/cli.md](docs/cli.md).
+
 Watch traffic live, as text or one JSON object per line:
 
 ```sh
