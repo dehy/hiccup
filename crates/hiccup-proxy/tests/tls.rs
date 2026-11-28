@@ -6,9 +6,11 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use hiccup_http::{Limits, Response};
 use hiccup_proxy::{
-    CertificateAuthority, ClientCert, Exchange, Proxy, ProxyConfig, TlsVersion, UpstreamConfig,
+    CertificateAuthority, ClientCert, Direction, Exchange, InterceptQueue, InterceptRules,
+    InterceptSettings, Modification, Proxy, ProxyConfig, TlsVersion, UpstreamConfig, Verdict,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
@@ -137,6 +139,10 @@ struct Harness {
 
 impl Harness {
     async fn start(config: ProxyConfig) -> Self {
+        Self::start_with(config, InterceptQueue::new()).await
+    }
+
+    async fn start_with(config: ProxyConfig, queue: Arc<InterceptQueue>) -> Self {
         let ca = Arc::new(CertificateAuthority::generate().unwrap());
         let exchanges = Arc::new(Mutex::new(Vec::new()));
         let recorded = exchanges.clone();
@@ -146,6 +152,7 @@ impl Harness {
         })
         .await
         .unwrap()
+        .with_intercept(queue)
         .with_observer(Arc::new(move |e: &Exchange| {
             recorded.lock().unwrap().push(e.clone());
         }))
@@ -381,6 +388,8 @@ async fn curl_trusts_the_intercepted_certificate() {
         .await
         .is_err()
     {
+        // CI runners all have curl: there, a skip would hide a failure.
+        assert!(std::env::var_os("CI").is_none(), "curl is required in CI");
         eprintln!("curl not found; skipping");
         return;
     }
@@ -408,6 +417,60 @@ async fn curl_trusts_the_intercepted_certificate() {
     );
     assert_eq!(out.stdout, b"localhost|GET /curl HTTP/1.1");
     assert_eq!(h.exchanges().len(), 1);
+}
+
+#[tokio::test]
+async fn a_request_inside_the_tunnel_can_be_held_and_edited() {
+    let origin = TlsOrigin::start().await;
+    let queue = InterceptQueue::new();
+    queue.set(InterceptSettings {
+        requests: Some(InterceptRules::default()),
+        ..InterceptSettings::default()
+    });
+    let h = Harness::start_with(ProxyConfig::default(), queue.clone()).await;
+    let tunnel = h
+        .connect(&format!("localhost:{}", origin.addr.port()))
+        .await;
+    let ca_cert = CertificateDer::from(h.ca.cert_der().to_vec());
+    let mut tls = tls_client(tunnel, &ca_cert, "localhost").await.unwrap();
+    let client = tokio::spawn(async move {
+        exchange(
+            &mut tls,
+            b"GET /original HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await
+    });
+
+    let held = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(p) = queue.list().into_iter().next() {
+                return p;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the request is held");
+    assert_eq!(held.direction, Direction::Request);
+    assert!(held.raw.starts_with(b"GET /original "), "held decrypted");
+    assert_eq!(origin.connections.load(Ordering::SeqCst), 0, "held first");
+
+    let edited = Bytes::from_static(b"GET /edited HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    queue
+        .resolve(held.id, Verdict::ForwardEdited(edited.clone()))
+        .unwrap();
+    assert_eq!(
+        body(&client.await.unwrap()),
+        "localhost|GET /edited HTTP/1.1"
+    );
+    let exchanges = h.exchanges();
+    assert!(exchanges[0].tls);
+    assert_eq!(exchanges[0].forwarded, edited);
+    assert!(
+        exchanges[0]
+            .modifications
+            .contains(&Modification::RequestEdited)
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -499,6 +499,8 @@ async fn curl_through_the_proxy() {
         .await
         .is_err()
     {
+        // CI runners all have curl: there, a skip would hide a failure.
+        assert!(std::env::var_os("CI").is_none(), "curl is required in CI");
         eprintln!("curl not found; skipping");
         return;
     }
@@ -632,6 +634,42 @@ async fn a_big_body_is_relayed_whole_and_kept_up_to_the_limit() {
         b"01234567"
     );
     assert!(exchanges[0].response_truncated);
+}
+
+#[tokio::test]
+async fn a_big_request_body_reaches_the_origin_whole() {
+    let origin = Origin::start(Origin::ok("got it")).await;
+    let proxy = start_proxy().await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    let body = vec![b'x'; 4 << 20];
+    let head = format!(
+        "POST http://{}/upload HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+        origin.addr,
+        body.len()
+    );
+    client.write_all(head.as_bytes()).await.unwrap();
+    client.write_all(&body).await.unwrap();
+    let mut buf = Vec::new();
+    let response = read_response(&mut client, &mut buf, b"POST").await;
+    assert_eq!(&response.body()[..], b"got it");
+
+    // The connection is still in step: the next request is answered too.
+    client
+        .write_all(format!("GET http://{}/next HTTP/1.1\r\n\r\n", origin.addr).as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(
+        read_response(&mut client, &mut buf, b"GET")
+            .await
+            .head()
+            .status_code(),
+        Some(200)
+    );
+
+    let received = origin.received();
+    assert!(received[0].starts_with(b"POST /upload HTTP/1.1\r\n"));
+    assert!(received[0].ends_with(&body), "the body, byte for byte");
+    assert!(received[1].starts_with(b"GET /next "));
 }
 
 #[tokio::test]
