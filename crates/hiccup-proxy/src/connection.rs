@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use hiccup_http::{
-    BodyDecoder, Error as HttpError, Framing, Head, Limits, Request, Response, ResponseHead,
+    BodyDecoder, Error as HttpError, Framing, Head, Limits, Request, RequestHead, Response,
+    ResponseHead,
 };
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -83,18 +84,19 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     peer: SocketAddr,
     mode: &Mode,
     ctx: &Context,
-) -> io::Result<Option<Request>> {
+) -> io::Result<Option<RequestHead>> {
     let mut upstream: Option<Upstream> = None;
     loop {
-        let Some(request) = read_request(client, buf, ctx).await? else {
+        let Some(head) = read_request_head(client, buf, ctx).await? else {
             return Ok(None);
         };
-        let _ = buf.split_to(request.len());
 
-        if matches!(mode, Mode::Proxy) && request.head().method() == b"CONNECT" {
-            return Ok(Some(request));
+        if matches!(mode, Mode::Proxy) && head.method() == b"CONNECT" {
+            // A CONNECT request has no content (RFC 9110 §9.3.6).
+            let _ = buf.split_to(head.len());
+            return Ok(Some(head));
         }
-        match forward(client, buf, peer, request, mode, &mut upstream, ctx).await? {
+        match forward(client, buf, peer, head, mode, &mut upstream, ctx).await? {
             Next::Continue => {}
             Next::Close => {
                 let _ = client.shutdown().await;
@@ -107,20 +109,19 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 // ---------------------------------------------------------------------------
 // Reading
 
-// shortcut: request bodies are read whole before forwarding (a large upload
-// is held in memory); stream them like responses, see #55.
-/// Reads the next complete request. Returns `None` when the connection should
-/// close without a response (EOF, idle timeout, shutdown, or an error that was
+/// Reads until `buf` starts with a complete request head, and parses it; the
+/// bytes stay in the buffer. Returns `None` when the connection should close
+/// without a response (EOF, idle timeout, shutdown, or an error that was
 /// already answered).
-async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
+async fn read_request_head<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut S,
     buf: &mut BytesMut,
     ctx: &Context,
-) -> io::Result<Option<Request>> {
+) -> io::Result<Option<RequestHead>> {
     let limits = &ctx.config.limits;
     loop {
-        match Request::parse(buf, limits, false) {
-            Ok(Some(request)) => return Ok(Some(request)),
+        match RequestHead::parse(buf, limits) {
+            Ok(Some(head)) => return Ok(Some(head)),
             Ok(None) => {}
             Err(e) => {
                 send_error(client, &e).await;
@@ -145,9 +146,32 @@ async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
         };
 
         if n == 0 {
-            if buf.is_empty() {
+            if !buf.is_empty() {
+                debug!("client closed mid-request");
+            }
+            return Ok(None);
+        }
+    }
+}
+
+/// Reads until `buf` starts with a complete request, whose head is already
+/// there. Returns `None` like [`read_request_head`].
+async fn read_whole_request<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut S,
+    buf: &mut BytesMut,
+    ctx: &Context,
+) -> io::Result<Option<Request>> {
+    let limits = &ctx.config.limits;
+    loop {
+        match Request::parse(buf, limits, false) {
+            Ok(Some(request)) => return Ok(Some(request)),
+            Ok(None) => {}
+            Err(e) => {
+                send_error(client, &e).await;
                 return Ok(None);
             }
+        }
+        if read_with_timeout(client, buf, ctx.config.read_timeout).await? == 0 {
             return match Request::parse(buf, limits, true) {
                 Ok(request) => Ok(request),
                 Err(e) => {
@@ -221,10 +245,10 @@ async fn read_head(
 
 /// Why relaying a body stopped early.
 enum Failure {
-    /// The upstream failed: this is a message for the exchange.
-    Upstream(String),
-    /// The client could not be written to.
-    Client(io::Error),
+    /// The sender failed: this is a message for the exchange.
+    Read(String),
+    /// The receiver could not be written to.
+    Write(io::Error),
 }
 
 /// A relayed body: what was kept of it, and how it ended.
@@ -235,57 +259,49 @@ struct Streamed {
     result: Result<(), Failure>,
 }
 
-/// Writes `head` to the client, then relays the body as it arrives from
-/// `upstream` (whose buffer starts right after the head), keeping up to
-/// `max_kept_body` bytes of it. Bytes after the body stay in the buffer.
-async fn stream_body<S: AsyncWrite + Unpin>(
-    client: &mut S,
-    upstream: &mut Upstream,
-    head: &ResponseHead,
+/// Writes `prefix` (the head) to `to`, then relays the body as it arrives
+/// from `from` (whose buffer `buf` starts right after the head), keeping up
+/// to `max_kept_body` bytes of it. Bytes after the body stay in `buf`.
+/// `sender` names `from` in errors.
+async fn relay_body<R, W>(
+    from: &mut R,
+    buf: &mut BytesMut,
+    to: &mut W,
+    prefix: &[u8],
     framing: Framing,
-    authority: &str,
+    sender: &str,
     ctx: &Context,
-) -> Streamed {
+) -> Streamed
+where
+    R: AsyncRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
     let cap = ctx.config.max_kept_body;
     let mut decoder = BodyDecoder::new(framing, ctx.config.limits);
     let mut kept = BytesMut::new();
     let mut truncated = false;
     let result = async {
-        client
-            .write_all(head.as_bytes())
-            .await
-            .map_err(Failure::Client)?;
+        to.write_all(prefix).await.map_err(Failure::Write)?;
         loop {
-            let used = decoder.feed(&upstream.buf).map_err(|e| {
-                Failure::Upstream(format!("invalid response body from {authority}: {e}"))
-            })?;
-            let body = upstream.buf.split_to(used);
-            client.write_all(&body).await.map_err(Failure::Client)?;
+            let used = decoder
+                .feed(buf)
+                .map_err(|e| Failure::Read(format!("invalid body from {sender}: {e}")))?;
+            let body = buf.split_to(used);
+            to.write_all(&body).await.map_err(Failure::Write)?;
             let room = cap.saturating_sub(kept.len());
             kept.extend_from_slice(&body[..room.min(body.len())]);
             truncated |= body.len() > room;
             if decoder.is_complete() {
                 return Ok(());
             }
-            let read = read_with_timeout(
-                &mut upstream.stream,
-                &mut upstream.buf,
-                ctx.config.read_timeout,
-            );
-            match read.await {
+            match read_with_timeout(from, buf, ctx.config.read_timeout).await {
                 Ok(0) => {
                     return decoder.finish().map_err(|e| {
-                        Failure::Upstream(format!(
-                            "{authority} closed the connection mid-body: {e}"
-                        ))
+                        Failure::Read(format!("{sender} closed the connection mid-body: {e}"))
                     });
                 }
                 Ok(_) => {}
-                Err(e) => {
-                    return Err(Failure::Upstream(format!(
-                        "error talking to {authority}: {e}"
-                    )));
-                }
+                Err(e) => return Err(Failure::Read(format!("error talking to {sender}: {e}"))),
             }
         }
     }
@@ -298,7 +314,7 @@ async fn stream_body<S: AsyncWrite + Unpin>(
     }
 }
 
-async fn read_with_timeout<S: AsyncRead + Unpin>(
+async fn read_with_timeout<S: AsyncRead + Unpin + ?Sized>(
     stream: &mut S,
     buf: &mut BytesMut,
     timeout: Duration,
@@ -317,14 +333,14 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut S,
     client_buf: &mut BytesMut,
     peer: SocketAddr,
-    request: Request,
+    head: RequestHead,
     mode: &Mode,
     upstream: &mut Option<Upstream>,
     ctx: &Context,
 ) -> io::Result<Next> {
     // `path` is the target as forwarded: what intercept rules match.
-    let (authority, forwarded, modifications, path) = match mode {
-        Mode::Proxy => match proxy_target(client, &request).await {
+    let (authority, forwarded_head, modifications, path) = match mode {
+        Mode::Proxy => match proxy_target(client, &head).await {
             Some((target, forwarded, modification)) => {
                 let path = String::from_utf8_lossy(&target.origin_form).into_owned();
                 (target.authority, forwarded, vec![modification], path)
@@ -334,10 +350,53 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         // Inside a tunnel, the client already addresses the origin server.
         Mode::Intercepted { authority, .. } => (
             authority.clone(),
-            Bytes::from(request.to_bytes()),
+            head.as_bytes().to_vec(),
             Vec::new(),
-            String::from_utf8_lossy(request.head().target()).into_owned(),
+            String::from_utf8_lossy(head.target()).into_owned(),
         ),
+    };
+
+    let tls = matches!(mode, Mode::Intercepted { .. });
+    let method_name = String::from_utf8_lossy(head.method()).into_owned();
+    let rule_input = RequestInfo {
+        method: &method_name,
+        target: crate::ScopeTarget {
+            scheme: if tls {
+                crate::Scheme::Https
+            } else {
+                crate::Scheme::Http
+            },
+            host: &authority.host,
+            port: authority.port,
+            path: &path,
+        },
+    };
+
+    // A body is relayed as it arrives, unless the request is to be held:
+    // editing needs all of it. One already received whole is not streamed,
+    // so that its connection can be reused, and the request retried.
+    let decision = head.framing();
+    let stream_request = matches!(decision.framing, Framing::Length(_) | Framing::Chunked)
+        && matches!(
+            Request::parse(client_buf, &ctx.config.limits, false),
+            Ok(None)
+        )
+        && !ctx
+            .intercept
+            .as_ref()
+            .is_some_and(|q| q.matches(Direction::Request, &rule_input));
+    let (received, forwarded) = if stream_request {
+        let _ = client_buf.split_to(head.len());
+        let received = Request::from_parts(head, decision, Bytes::new(), Vec::new());
+        (received, Bytes::from(forwarded_head))
+    } else {
+        let Some(request) = read_whole_request(client, client_buf, ctx).await? else {
+            return Ok(Next::Close);
+        };
+        let _ = client_buf.split_to(request.len());
+        let mut forwarded = forwarded_head;
+        forwarded.extend_from_slice(request.body());
+        (request, Bytes::from(forwarded))
     };
 
     let mut exchange = Exchange {
@@ -348,10 +407,11 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         duration: std::time::Duration::ZERO,
         client: peer,
         upstream: authority.to_string(),
-        tls: matches!(mode, Mode::Intercepted { .. }),
-        received: request,
+        tls,
+        received,
         forwarded,
         modifications,
+        request_truncated: false,
         interim: Vec::new(),
         response: None,
         response_truncated: false,
@@ -368,21 +428,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     if let Some(observer) = &ctx.request_observer {
         observer(&exchange);
     }
-    let method_name = String::from_utf8_lossy(exchange.received.head().method()).into_owned();
-    let rule_input = RequestInfo {
-        method: &method_name,
-        target: crate::ScopeTarget {
-            scheme: if exchange.tls {
-                crate::Scheme::Https
-            } else {
-                crate::Scheme::Http
-            },
-            host: &authority.host,
-            port: authority.port,
-            path: &path,
-        },
-    };
-    let (upstream_name, tls) = (exchange.upstream.clone(), exchange.tls);
+    let upstream_name = exchange.upstream.clone();
     let pending = |direction, raw: Bytes, status| {
         let upstream = upstream_name.clone();
         let (method, target) = (method_name.clone(), path.clone());
@@ -398,7 +444,7 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
             since: std::time::Instant::now(),
         }
     };
-    if let Some(queue) = &ctx.intercept {
+    if let Some(queue) = ctx.intercept.as_ref().filter(|_| !stream_request) {
         let held = pending(Direction::Request, exchange.forwarded.clone(), None);
         match queue.hold(Direction::Request, &rule_input, held).await {
             Verdict::Forward => {}
@@ -422,8 +468,10 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
             || exchange.received.head().method().to_vec(),
             |r| r.head().method().to_vec(),
         );
+    let body = stream_request.then_some(&mut *client_buf);
     let head = match round_trip(
         client,
+        body,
         &mut exchange,
         &method,
         &authority,
@@ -464,7 +512,16 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
     {
         let up = upstream.as_mut().expect("upstream is connected");
         let _ = up.buf.split_to(head.len());
-        let streamed = stream_body(client, up, &head, framing, &exchange.upstream, ctx).await;
+        let streamed = relay_body(
+            &mut up.stream,
+            &mut up.buf,
+            client,
+            head.as_bytes(),
+            framing,
+            &exchange.upstream,
+            ctx,
+        )
+        .await;
         exchange.response = Some(Response::from_parts(
             head,
             decision,
@@ -477,12 +534,12 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let ok = match streamed.result {
             Ok(()) => true,
-            Err(Failure::Upstream(detail)) => {
+            Err(Failure::Read(detail)) => {
                 // The head is already sent: the client sees a cut response.
                 exchange.error = Some(detail);
                 false
             }
-            Err(Failure::Client(e)) => {
+            Err(Failure::Write(e)) => {
                 exchange.error = Some(format!("cannot send the response to the client: {e}"));
                 notify(ctx, &mut exchange);
                 return Err(e);
@@ -574,8 +631,19 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
 /// upstream buffer. Interim (1xx) responses are relayed to the client as
 /// they come. Retries once on a new connection if a reused one turns out to
 /// be closed. Errors are the 502's detail.
+///
+/// With `body`, the client buffer that starts with the request body, the
+/// body is relayed as it arrives, on a new connection: it cannot be resent.
+// shortcut: a streamed body is sent before the response is read, so a
+// `100 Continue` reaches the client only after it sent the body anyway
+// (clients wait a second, then send it); relay it early if that matters.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call site, all distinct state"
+)]
 async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut S,
+    mut body: Option<&mut BytesMut>,
     exchange: &mut Exchange,
     method: &[u8],
     authority: &Authority,
@@ -585,6 +653,9 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<ResponseHead, String> {
     let retry_allowed = is_idempotent(method);
     let mut attempt = 0;
+    if body.is_some() {
+        *upstream = None;
+    }
     loop {
         attempt += 1;
         let reused = upstream.as_ref().is_some_and(|u| u.authority == *authority);
@@ -602,9 +673,43 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let up = upstream.as_mut().expect("upstream is connected");
 
+        let streamed = body.is_some();
+        if let Some(buf) = body.take() {
+            let framing = exchange.received.framing().framing;
+            let s = relay_body(
+                client,
+                buf,
+                &mut up.stream,
+                &exchange.forwarded,
+                framing,
+                "the client",
+                ctx,
+            )
+            .await;
+            let mut forwarded = exchange.forwarded.to_vec();
+            forwarded.extend_from_slice(&s.kept);
+            exchange.forwarded = Bytes::from(forwarded);
+            exchange.received = Request::from_parts(
+                exchange.received.head().clone(),
+                exchange.received.framing().clone(),
+                s.kept,
+                s.anomalies,
+            );
+            exchange.request_truncated = s.truncated;
+            if let Err(failure) = s.result {
+                *upstream = None;
+                return Err(match failure {
+                    Failure::Read(detail) => detail,
+                    Failure::Write(e) => format!("error talking to {authority}: {e}"),
+                });
+            }
+        }
+
         let (limits, timeout) = (&ctx.config.limits, ctx.config.read_timeout);
         let result: io::Result<Option<ResponseHead>> = async {
-            up.stream.write_all(&exchange.forwarded).await?;
+            if !streamed {
+                up.stream.write_all(&exchange.forwarded).await?;
+            }
             loop {
                 let Some(head) = read_head(up, limits, timeout).await? else {
                     return Ok(None);
@@ -660,11 +765,11 @@ async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
 /// origin-form. Answers the client and returns `None` if it cannot.
 async fn proxy_target<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut S,
-    request: &Request,
-) -> Option<(AbsoluteTarget, Bytes, Modification)> {
-    let (status, reason, detail) = match AbsoluteTarget::parse(request.head().target()) {
+    head: &RequestHead,
+) -> Option<(AbsoluteTarget, Vec<u8>, Modification)> {
+    let (status, reason, detail) = match AbsoluteTarget::parse(head.target()) {
         Ok(target) => {
-            let (forwarded, modification) = rewrite_target(request, &target);
+            let (forwarded, modification) = rewrite_target(head, &target);
             return Some((target, forwarded, modification));
         }
         Err(TargetError::OriginForm) => (
@@ -712,20 +817,19 @@ async fn open_upstream(
 }
 
 /// Replaces the absolute-form target with origin-form, keeping every other
-/// byte of the request.
-fn rewrite_target(request: &Request, target: &AbsoluteTarget) -> (Bytes, Modification) {
-    let raw = request.head().as_bytes();
-    let (_, span, _) = request.head().request_line_spans();
-    let mut out = Vec::with_capacity(request.len());
+/// byte of the head.
+fn rewrite_target(head: &RequestHead, target: &AbsoluteTarget) -> (Vec<u8>, Modification) {
+    let raw = head.as_bytes();
+    let (_, span, _) = head.request_line_spans();
+    let mut out = Vec::with_capacity(raw.len());
     out.extend_from_slice(&raw[..span.start]);
     out.extend_from_slice(&target.origin_form);
     out.extend_from_slice(&raw[span.end..]);
-    out.extend_from_slice(request.body());
     let modification = Modification::TargetRewritten {
         original: Bytes::copy_from_slice(span.slice(raw)),
         rewritten: Bytes::copy_from_slice(&target.origin_form),
     };
-    (Bytes::from(out), modification)
+    (out, modification)
 }
 
 /// Whether the sender of `head`, which has this HTTP `version`, expects the
@@ -773,10 +877,10 @@ async fn handle_connect(
     mut client: TcpStream,
     mut pending: BytesMut,
     peer: SocketAddr,
-    request: &Request,
+    request: &RequestHead,
     ctx: &Context,
 ) -> io::Result<()> {
-    let Some(authority) = Authority::parse(request.head().target(), None) else {
+    let Some(authority) = Authority::parse(request.target(), None) else {
         write_error(
             &mut client,
             400,
@@ -1048,7 +1152,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let target = AbsoluteTarget::parse(request.head().target()).unwrap();
-        let (forwarded, modification) = rewrite_target(&request, &target);
+        let (forwarded, modification) = rewrite_target(request.head(), &target);
         assert_eq!(
             &forwarded[..],
             b"GET /a?b HTTP/1.1\r\nHost: example.com\r\nProxy-Connection: keep-alive\r\n\r\n"

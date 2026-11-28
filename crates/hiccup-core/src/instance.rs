@@ -516,6 +516,7 @@ fn history_summary(s: &Summary) -> HistorySummary {
         status: s.status,
         mime: s.mime.clone(),
         request_size: s.request_size,
+        request_truncated: s.request_truncated,
         response_size: s.response_size,
         response_truncated: s.response_truncated,
         request_edited: s.request_edited,

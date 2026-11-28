@@ -396,8 +396,11 @@ pub struct HistorySummary {
     /// The response's media type, lowercase, without parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
-    /// Size of the request as received, in bytes.
+    /// Size of the request as kept, in bytes.
     pub request_size: u64,
+    /// Only the start of a very large request body was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub request_truncated: bool,
     /// Size of the response as kept, in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_size: Option<u64>,
@@ -567,6 +570,7 @@ fn example_history() -> HistorySummary {
         status: Some(200),
         mime: Some("application/json".to_owned()),
         request_size: 412,
+        request_truncated: false,
         response_size: Some(5321),
         response_truncated: false,
         request_edited: false,

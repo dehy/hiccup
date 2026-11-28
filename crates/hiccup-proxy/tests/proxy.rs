@@ -672,6 +672,104 @@ async fn a_big_request_body_reaches_the_origin_whole() {
     assert!(received[1].starts_with(b"GET /next "));
 }
 
+/// An origin that sends what it reads on the channel as it arrives, and
+/// answers 200 once the request is complete.
+async fn watching_origin() -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        while !matches!(Request::parse(&buf, &Limits::DEFAULT, false), Ok(Some(_))) {
+            let mut chunk = [0u8; 4096];
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    let _ = tx.send(chunk[..n].to_vec());
+                }
+            }
+        }
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await;
+    });
+    (addr, rx)
+}
+
+/// Receives from `rx` until what was received ends with `suffix`.
+async fn received_until(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    got: &mut Vec<u8>,
+    suffix: &[u8],
+) {
+    while !got.ends_with(suffix) {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out: the bytes were not relayed")
+            .expect("the origin closed");
+        got.extend_from_slice(&chunk);
+    }
+}
+
+#[tokio::test]
+async fn a_request_body_is_relayed_as_it_arrives_and_kept_up_to_the_limit() {
+    let (origin, mut rx) = watching_origin().await;
+    let proxy = start_proxy_with(|c| c.max_kept_body = 4).await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(
+            format!("PUT http://{origin}/up HTTP/1.1\r\nContent-Length: 9\r\n\r\nfirst").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    received_until(&mut rx, &mut got, b"first").await;
+    assert_eq!(*proxy.requests.lock().unwrap(), [1], "its request is known");
+
+    client.write_all(b"last").await.unwrap();
+    let response = read_response(&mut client, &mut Vec::new(), b"PUT").await;
+    assert_eq!(&response.body()[..], b"ok");
+    assert_eq!(
+        got.iter().chain(b"last").copied().collect::<Vec<_>>(),
+        b"PUT /up HTTP/1.1\r\nContent-Length: 9\r\n\r\nfirstlast"
+    );
+
+    let exchanges = proxy.exchanges.lock().unwrap();
+    assert_eq!(&exchanges[0].received.body()[..], b"firs");
+    assert!(exchanges[0].forwarded.ends_with(b"\r\n\r\nfirs"));
+    assert!(exchanges[0].request_truncated && exchanges[0].error.is_none());
+}
+
+#[tokio::test]
+async fn a_client_dying_mid_body_is_recorded() {
+    let (origin, mut rx) = watching_origin().await;
+    let proxy = start_proxy().await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(
+            format!("POST http://{origin}/ HTTP/1.1\r\nContent-Length: 10\r\n\r\nhalf").as_bytes(),
+        )
+        .await
+        .unwrap();
+    received_until(&mut rx, &mut Vec::new(), b"half").await;
+    drop(client);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while proxy.exchanges.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "not recorded");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let exchanges = proxy.exchanges.lock().unwrap();
+    let error = exchanges[0].error.as_deref().unwrap();
+    assert!(
+        error.contains("the client closed the connection mid-body"),
+        "{error}"
+    );
+    assert_eq!(&exchanges[0].received.body()[..], b"half");
+}
+
 #[tokio::test]
 async fn an_upstream_dying_mid_body_closes_the_client() {
     // Ten bytes announced, four sent, then the origin closes.
