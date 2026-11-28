@@ -15,7 +15,7 @@ Hiccup is an independent project. It is not affiliated with or endorsed by PortS
 
 - **Intercepting proxy:** HTTP/1.1 and HTTPS (TLS MITM with a locally generated CA).
 - **Repeater:** edit and resend requests while keeping the exact bytes.
-- **Native UIs:** GTK4 on Linux, SwiftUI on macOS and WinUI 3 on Windows, all on a shared Rust core.
+- **Native UIs:** SwiftUI on macOS, WinUI 3 on Windows and GTK4 on Linux, all on a shared Rust core.
 - **Entirely controllable from the CLI:** every feature is available from `hiccup`, which can also drive a running instance, including the GUI.
 
 ## Building from source

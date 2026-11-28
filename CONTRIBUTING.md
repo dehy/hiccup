@@ -21,7 +21,7 @@ You need a Rust toolchain installed with [rustup](https://rustup.rs). The reposi
 | macOS   | Xcode Command Line Tools (`xcode-select --install`) |
 | Windows | Visual Studio Build Tools with the "Desktop development with C++" workload |
 
-The native frontends (from M4 onward) will add per-OS requirements (GTK4/libadwaita, Xcode, Windows App SDK). They will be documented here.
+The native frontends (from M4 onward) will add per-OS requirements (Xcode, Windows App SDK, GTK4/libadwaita). They will be documented here.
 
 ```sh
 git clone https://github.com/dehy/hiccup.git

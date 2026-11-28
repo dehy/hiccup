@@ -12,4 +12,4 @@ Distribute on macOS.
 
 ## Acceptance criteria
 
-- [ ] A notarized `.dmg` opens without Gatekeeper warnings; v0.2.0 released
+- [ ] A notarized `.dmg` opens without Gatekeeper warnings

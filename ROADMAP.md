@@ -22,11 +22,11 @@ Hiccup is a free, open source, cross-platform toolkit for web application securi
 | M1 | [Proxy core](docs/roadmap/issues/m1-proxy-core/) | Headless HTTP/1.1 + HTTPS MITM proxy with history, intercept and CLI control API | curl and a browser work through the proxy, driven entirely by the CLI, on all 3 OSes | — | In progress |
 | M2 | [Repeater core](docs/roadmap/issues/m2-repeater-core/) | Headless raw request sender with persisted tabs | Replaying a captured request is byte-identical, which tests verify | — | Planned |
 | M3 | [FFI layer](docs/roadmap/issues/m3-ffi/) | Core API exposed to Swift and C# | Swift and C# smoke tests pass in CI on macOS and Windows | — | Planned |
-| M4 | [Linux frontend](docs/roadmap/issues/m4-linux-frontend/) | GTK4 + libadwaita UI for proxy and repeater | Full proxy + repeater workflow usable; packages built | **v0.1.0** | Planned |
-| M5 | [macOS frontend](docs/roadmap/issues/m5-macos-frontend/) | SwiftUI UI at parity with M4 | Parity checklist passes; notarized .dmg | v0.2.0 | Planned |
-| M6 | [Windows frontend](docs/roadmap/issues/m6-windows-frontend/) | WinUI 3 UI at parity with M4 | Parity checklist passes; signed MSIX/MSI | v0.3.0 | Planned |
+| M4 | [macOS frontend](docs/roadmap/issues/m4-macos-frontend/) | SwiftUI UI for proxy and repeater | Full proxy + repeater workflow usable; notarized .dmg | **v0.1.0** | Planned |
+| M5 | [Windows frontend](docs/roadmap/issues/m5-windows-frontend/) | WinUI 3 UI at parity with M4 | Parity checklist passes; signed MSIX/MSI | v0.2.0 | Planned |
+| M6 | [Linux frontend](docs/roadmap/issues/m6-linux-frontend/) | GTK4 + libadwaita UI at parity with M4 | Parity checklist passes; packages built | v0.3.0 | Planned |
 
-The Linux frontend comes first because it is the primary development platform. macOS and Windows follow. The core is cross-platform from M0, so the headless CLI works on all three OSes well before their GUIs exist.
+The macOS frontend comes first because macOS (Apple silicon) is the primary development platform. Windows and Linux follow, in that order. The core is cross-platform from M0, so the headless CLI works on all three OSes well before their GUIs exist.
 
 ### M0: Foundations
 Cargo workspace (`hiccup-core`, `hiccup-http`, `hiccup-proxy`, `hiccup-store`, `hiccup-control`, `hiccup-cli`; `hiccup-ffi` arrives with M3), MSRV policy, rustfmt/clippy/cargo-deny, a GitHub Actions matrix (ubuntu/macos/windows), CONTRIBUTING, Code of Conduct, SECURITY policy, issue/PR templates, Conventional Commits + DCO, CHANGELOG, and the release process.
@@ -40,14 +40,14 @@ A raw sender that writes the exact bytes; target separate from the `Host` header
 ### M3: FFI layer
 A UniFFI interface for projects, proxy control, intercept, paginated history and repeater; async event callbacks; a Swift package; a spike to choose the C# binding strategy; smoke-test host apps in CI.
 
-### M4: Linux frontend (GTK4 + libadwaita)
-Proxy history with filtering, a request/response viewer (raw/headers/hex), the intercept pane, Repeater tabs with an editor, settings (listener, CA export and install guide), an embedded control server so the CLI drives the GUI live, and Flatpak/AppImage/.deb packaging. Ends with **v0.1.0**.
+### M4: macOS frontend (SwiftUI)
+Proxy history with filtering, a request/response viewer (raw/headers/hex), the intercept pane, Repeater tabs with an editor, settings (listener, CA export and a Keychain install guide), an embedded control server so the CLI drives the GUI live, a universal binary, a signed and notarized `.dmg`, and a Homebrew cask. Ends with **v0.1.0**.
 
-### M5: macOS frontend (SwiftUI)
-Parity with M4, a universal binary, a signed and notarized `.dmg`, and a Homebrew cask.
+### M5: Windows frontend (WinUI 3)
+Parity with M4, MSIX/MSI, a winget manifest, and a CA install helper. Ends with v0.2.0.
 
-### M6: Windows frontend (WinUI 3)
-Parity with M4, MSIX/MSI, a winget manifest, and a CA install helper.
+### M6: Linux frontend (GTK4 + libadwaita)
+Parity with M4, and Flatpak/AppImage/.deb/.rpm packaging. Ends with v0.3.0.
 
 ## Backlog (after M6, unordered)
 

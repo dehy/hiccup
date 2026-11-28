@@ -25,7 +25,7 @@ core        │ hiccup-control ── hiccup-core ── hiccup-proxy ── hic
 | `hiccup-control` | Local control API: JSON-RPC 2.0 over Unix socket / named pipe, instance discovery ([ADR 0004](adr/0004-cli-control-plane.md)). |
 | `hiccup-cli`     | The `hiccup` binary: a client of the control API, and the headless daemon (`hiccup serve`). |
 
-Planned for later milestones: `hiccup-ffi` (M3, UniFFI bindings for Swift/C#) and `hiccup-gtk` (M4). They are not in the workspace yet, so that we don't carry empty crates or unused dependencies.
+Planned for later milestones: `hiccup-ffi` (M3, UniFFI bindings for Swift/C#) and `hiccup-gtk` (M6). They are not in the workspace yet, so that we don't carry empty crates or unused dependencies.
 
 ## Rules
 
