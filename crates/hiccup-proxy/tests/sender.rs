@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hiccup_proxy::{SendTarget, Sender, UpstreamConfig};
+use hiccup_proxy::{Applied, Helpers, Redirects, Scope, SendTarget, Sender, UpstreamConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -100,10 +100,20 @@ async fn the_exact_bytes_are_sent_to_the_target_whatever_the_host_header() {
     let (addr, captured) =
         plain_server(Some(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")).await;
     let sent = sender()
-        .send(&target(addr, false), ODD, &CancellationToken::new())
-        .await;
+        .send(
+            &target(addr, false),
+            ODD,
+            &Helpers::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .remove(0);
     assert_eq!(sent.error, None);
     assert_eq!(captured.await.unwrap().0, ODD, "byte for byte");
+    assert!(
+        sent.applied.is_empty() && sent.request == ODD,
+        "helpers off"
+    );
 
     let response = sent.response.unwrap();
     assert_eq!(response.head().status_code(), Some(200));
@@ -124,8 +134,14 @@ async fn tls_uses_the_upstream_options() {
         .push(("*".parse().unwrap(), "origin.test".to_owned()));
     let sender = Sender::new(upstream).unwrap();
     let sent = sender
-        .send(&target(addr, true), ODD, &CancellationToken::new())
-        .await;
+        .send(
+            &target(addr, true),
+            ODD,
+            &Helpers::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .remove(0);
     assert_eq!(sent.error, None);
     let (got, sni) = captured.await.unwrap();
     assert_eq!(got, ODD, "byte for byte, inside TLS");
@@ -147,9 +163,11 @@ async fn a_host_name_is_resolved_and_timed() {
         .send(
             &localhost,
             b"GET / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert_eq!(sent.error, None);
     assert!(sent.timings.dns.is_some());
 }
@@ -164,9 +182,11 @@ async fn interim_responses_come_before_the_final_one() {
         .send(
             &target(addr, false),
             b"POST / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert_eq!(sent.interim.len(), 1);
     assert_eq!(sent.response.unwrap().head().status_code(), Some(200));
 }
@@ -179,9 +199,11 @@ async fn a_head_response_has_no_body() {
         .send(
             &target(addr, false),
             b"HEAD / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert_eq!(sent.error, None, "complete without the 99 bytes");
 }
 
@@ -194,9 +216,11 @@ async fn failures_keep_what_was_received() {
         .send(
             &target(addr, false),
             b"GET / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert!(sent.error.unwrap().contains("invalid response"));
     assert!(sent.response.is_none());
     assert!(sent.raw_response.ends_with(b"half"));
@@ -207,9 +231,11 @@ async fn failures_keep_what_was_received() {
         .send(
             &target(addr, false),
             b"GET / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert_eq!(
         sent.error.as_deref(),
         Some("the connection closed without a response")
@@ -223,9 +249,11 @@ async fn failures_keep_what_was_received() {
         .send(
             &target(addr, false),
             b"GET / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert!(
         sent.error
             .unwrap()
@@ -243,9 +271,11 @@ async fn a_silent_server_times_out_and_a_send_can_be_cancelled() {
         .send(
             &target(addr, false),
             b"GET / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .remove(0);
     assert_eq!(
         sent.error.as_deref(),
         Some("cannot read the response: timed out")
@@ -261,8 +291,221 @@ async fn a_silent_server_times_out_and_a_send_can_be_cancelled() {
         stop.cancel();
     });
     let sent = sender
-        .send(&target(addr, false), b"GET / HTTP/1.1\r\n\r\n", &cancel)
-        .await;
+        .send(
+            &target(addr, false),
+            b"GET / HTTP/1.1\r\n\r\n",
+            &Helpers::default(),
+            &cancel,
+        )
+        .await
+        .remove(0);
     assert_eq!(sent.error.as_deref(), Some("cancelled"));
     assert!(sent.timings.total < Duration::from_secs(5));
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (#20)
+
+/// A server that answers each request on each connection with the next
+/// reply, and records the requests and how many connections it saw.
+async fn scripted(
+    replies: Vec<&'static [u8]>,
+) -> (
+    SocketAddr,
+    Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let replies = Arc::new(std::sync::Mutex::new(replies.into_iter()));
+    let (rec, conns) = (seen.clone(), connections.clone());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            conns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (rec, replies) = (rec.clone(), replies.clone());
+            tokio::spawn(async move {
+                loop {
+                    let mut buf = Vec::new();
+                    while hiccup_http::Request::parse(&buf, &hiccup_http::Limits::DEFAULT, false)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
+                        let mut chunk = [0u8; 4096];
+                        match s.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    rec.lock().unwrap().push(buf);
+                    let Some(reply) = replies.lock().unwrap().next() else {
+                        return;
+                    };
+                    if s.write_all(reply).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, seen, connections)
+}
+
+#[tokio::test]
+async fn content_length_is_updated_only_when_asked() {
+    let ok: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    let (addr, seen, _) = scripted(vec![ok, ok]).await;
+    let request = b"POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nabc";
+    let sender = sender();
+    let helpers = Helpers {
+        update_content_length: true,
+        ..Helpers::default()
+    };
+    let sent = sender
+        .send(
+            &target(addr, false),
+            request,
+            &helpers,
+            &CancellationToken::new(),
+        )
+        .await
+        .remove(0);
+    assert_eq!(sent.applied, [Applied::ContentLengthUpdated], "shown");
+    assert_eq!(
+        &sent.request[..],
+        b"POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc"
+    );
+    assert_eq!(seen.lock().unwrap()[0], sent.request);
+}
+
+#[tokio::test]
+async fn redirects_are_followed_per_policy_up_to_the_limit() {
+    let chain = || {
+        scripted(vec![
+            b"HTTP/1.1 302 Found\r\nLocation: /two\r\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 301 Moved\r\nLocation: /out\r\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+        ])
+    };
+    let sender = sender();
+    let request = b"GET /one HTTP/1.1\r\nHost: x\r\n\r\n";
+    let cancel = CancellationToken::new();
+
+    // Off by default: the redirect is the response.
+    let (origin, _, _) = chain().await;
+    let hops = sender
+        .send(
+            &target(origin, false),
+            request,
+            &Helpers::default(),
+            &cancel,
+        )
+        .await;
+    assert_eq!(hops.len(), 1);
+    assert_eq!(
+        hops[0].response.as_ref().unwrap().head().status_code(),
+        Some(302)
+    );
+
+    // Always, but at most one hop.
+    let (origin, seen, _) = chain().await;
+    let always = Helpers {
+        redirects: Redirects::Always,
+        max_redirects: 1,
+        ..Helpers::default()
+    };
+    let hops = sender
+        .send(&target(origin, false), request, &always, &cancel)
+        .await;
+    assert_eq!(hops.len(), 2);
+    assert_eq!(hops[1].applied, [Applied::FollowedRedirect]);
+    assert_eq!(
+        &hops[1].request[..],
+        b"GET /two HTTP/1.1\r\nHost: x\r\n\r\n"
+    );
+    assert_eq!(
+        hops[1].response.as_ref().unwrap().head().status_code(),
+        Some(301)
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2, "/out is not requested");
+
+    // In scope only: /out is excluded, so the chain stops before it.
+    let (origin, _, _) = chain().await;
+    let mut scope = Scope::default();
+    scope.rules.push(hiccup_proxy::ScopeRule {
+        exclude: true,
+        scheme: None,
+        host: "*".parse().unwrap(),
+        port: None,
+        path: Some(regex::Regex::new("^/out").unwrap()),
+    });
+    let in_scope = Helpers {
+        redirects: Redirects::InScope(scope),
+        max_redirects: 5,
+        ..Helpers::default()
+    };
+    let hops = sender
+        .send(&target(origin, false), request, &in_scope, &cancel)
+        .await;
+    assert_eq!(hops.len(), 2, "/two, but not /out");
+}
+
+#[tokio::test]
+async fn a_connection_is_reused_only_when_asked() {
+    let ok: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    let (addr, _, connections) = scripted(vec![ok, ok, ok, ok]).await;
+    let sender = sender();
+    let get = b"GET / HTTP/1.1\r\n\r\n";
+    let reuse = Helpers {
+        reuse_connection: true,
+        ..Helpers::default()
+    };
+    let (to, cancel) = (target(addr, false), CancellationToken::new());
+    let send = |helpers| sender.send(&to, get, helpers, &cancel);
+
+    let first = send(&reuse).await.remove(0);
+    assert!(first.applied.is_empty() && first.timings.connect.is_some());
+    let second = send(&reuse).await.remove(0);
+    assert_eq!(second.applied, [Applied::ReusedConnection]);
+    assert!(second.timings.connect.is_none() && second.error.is_none());
+    assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Off: a new connection each time.
+    send(&Helpers::default()).await;
+    assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_reused_connection_that_was_closed_is_replaced() {
+    // Answers one request per connection, then closes it.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let conns = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            conns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut chunk = [0u8; 4096];
+            let _ = s.read(&mut chunk).await;
+            let _ = s
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        }
+    });
+    let sender = sender();
+    let reuse = Helpers {
+        reuse_connection: true,
+        ..Helpers::default()
+    };
+    let get = b"GET / HTTP/1.1\r\n\r\n";
+    let (to, cancel) = (target(addr, false), CancellationToken::new());
+    let send = || sender.send(&to, get, &reuse, &cancel);
+    assert_eq!(send().await[0].error, None);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let second = send().await.remove(0);
+    assert_eq!(second.error, None, "retried on a new connection");
+    assert!(second.applied.is_empty(), "not reused in the end");
+    assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

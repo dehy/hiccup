@@ -4,20 +4,60 @@
 //! target set apart from them, and reads the response with the codec.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use hiccup_http::{Framing, Limits, Response};
+use hiccup_http::{Framing, Limits, RequestHead, Response};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 
-use crate::UpstreamConfig;
 use crate::ca::CaError;
+use crate::connection::{is_idempotent, keep_alive};
+use crate::helpers::{redirect, update_content_length};
+use crate::io::Io;
 use crate::tls::Clients;
+use crate::{Scheme, Scope, ScopeTarget, UpstreamConfig};
+
+/// Opt-in conveniences. With the default, all off, the bytes sent are the
+/// bytes given, exactly.
+#[derive(Clone, Debug, Default)]
+pub struct Helpers {
+    /// Set `Content-Length` to the length of the body (or add it).
+    pub update_content_length: bool,
+    /// Which redirects to follow.
+    pub redirects: Redirects,
+    /// How many redirects to follow at most.
+    pub max_redirects: u8,
+    /// Keep the connection open for the next send to the same target.
+    pub reuse_connection: bool,
+}
+
+/// Which redirects to follow.
+#[derive(Clone, Debug, Default)]
+pub enum Redirects {
+    /// None: the redirect is the response.
+    #[default]
+    Never,
+    /// Every redirect.
+    Always,
+    /// Redirects to URLs in this scope.
+    InScope(Scope),
+}
+
+/// A helper that changed a send, so that it can be shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applied {
+    /// `Content-Length` was set to the length of the body.
+    ContentLengthUpdated,
+    /// This request follows a redirect from the previous one.
+    FollowedRedirect,
+    /// The connection of an earlier send was reused.
+    ReusedConnection,
+}
 
 /// Where to send: set apart from the request, whose `Host` header may say
 /// anything.
@@ -51,6 +91,12 @@ pub struct Timings {
 /// hold what happened until then.
 #[derive(Clone, Debug)]
 pub struct Sent {
+    /// Where the request went.
+    pub target: SendTarget,
+    /// The bytes sent.
+    pub request: Bytes,
+    /// The helpers that changed this send.
+    pub applied: Vec<Applied>,
     /// The address connected to.
     pub peer: Option<SocketAddr>,
     /// Interim (1xx) responses, before the final one.
@@ -65,6 +111,9 @@ pub struct Sent {
     pub error: Option<String>,
 }
 
+/// An open connection, with its target and peer address.
+type Idle = (SendTarget, Option<SocketAddr>, Box<dyn Io>);
+
 /// Sends raw requests with the upstream options of the proxy: TLS versions,
 /// verification, SNI, `--resolve` and client certificates.
 pub struct Sender {
@@ -76,6 +125,8 @@ pub struct Sender {
     pub read_timeout: Duration,
     /// Bounds for parsing the response.
     pub limits: Limits,
+    /// A connection kept for [`Helpers::reuse_connection`].
+    idle: Mutex<Option<Idle>>,
 }
 
 impl Sender {
@@ -94,21 +145,74 @@ impl Sender {
             connect_timeout: defaults.connect_timeout,
             read_timeout: defaults.read_timeout,
             limits: defaults.limits,
+            idle: Mutex::new(None),
         })
     }
 
     // shortcut: the whole response is kept in memory, whatever its size; cap
     // it like the proxy's `max_kept_body` if repeated downloads get large.
-    /// Sends `request` to `target`, byte for byte, and reads the response.
-    /// `cancel` stops it at any point; the result then says so.
+    /// Sends `request` to `target` and reads the response. Without helpers,
+    /// the bytes sent are `request`, exactly. Returns one [`Sent`] per
+    /// request: the first, then one per redirect followed. `cancel` stops it
+    /// at any point; the last [`Sent`] then says so.
     pub async fn send(
         &self,
         target: &SendTarget,
         request: &[u8],
+        helpers: &Helpers,
+        cancel: &CancellationToken,
+    ) -> Vec<Sent> {
+        let (max_hops, scope) = match &helpers.redirects {
+            Redirects::Never => (0, None),
+            Redirects::Always => (helpers.max_redirects, None),
+            Redirects::InScope(scope) => (helpers.max_redirects, Some(scope)),
+        };
+        let mut next = (target.clone(), request.to_vec(), Vec::new());
+        if helpers.update_content_length
+            && let Some(fixed) = update_content_length(request, &self.limits)
+        {
+            next.1 = fixed;
+            next.2.push(Applied::ContentLengthUpdated);
+        }
+        let mut hops: Vec<Sent> = Vec::new();
+        loop {
+            let (target, request, applied) = next;
+            let sent = self
+                .send_one(
+                    target,
+                    request.into(),
+                    applied,
+                    helpers.reuse_connection,
+                    cancel,
+                )
+                .await;
+            let found = sent
+                .response
+                .as_ref()
+                .filter(|_| hops.len() < usize::from(max_hops))
+                .and_then(|r| redirect(&sent.target, &sent.request, r.head(), &self.limits))
+                .filter(|(next, request)| scope.is_none_or(|s| in_scope(s, next, request)));
+            hops.push(sent);
+            let Some((target, request)) = found else {
+                return hops;
+            };
+            next = (target, request, vec![Applied::FollowedRedirect]);
+        }
+    }
+
+    async fn send_one(
+        &self,
+        target: SendTarget,
+        request: Bytes,
+        applied: Vec<Applied>,
+        reuse: bool,
         cancel: &CancellationToken,
     ) -> Sent {
         let started = Instant::now();
         let mut sent = Sent {
+            target,
+            request,
+            applied,
             peer: None,
             interim: Vec::new(),
             response: None,
@@ -118,7 +222,7 @@ impl Sender {
         };
         let mut raw = BytesMut::new();
         let result = tokio::select! {
-            r = self.exchange(target, request, &mut sent, &mut raw) => r,
+            r = self.exchange(&mut sent, &mut raw, reuse) => r,
             () = cancel.cancelled() => Err("cancelled".to_owned()),
         };
         sent.error = result.err();
@@ -129,11 +233,44 @@ impl Sender {
 
     async fn exchange(
         &self,
-        target: &SendTarget,
-        request: &[u8],
         sent: &mut Sent,
         raw: &mut BytesMut,
+        reuse: bool,
     ) -> Result<(), String> {
+        let idle = self.idle.lock().expect("not poisoned").take();
+        if let Some((target, peer, mut stream)) = idle.filter(|(t, ..)| reuse && *t == sent.target)
+        {
+            sent.peer = peer;
+            sent.applied.push(Applied::ReusedConnection);
+            match self.round_trip(&mut stream, sent, raw).await {
+                Ok(keep) => {
+                    self.keep(keep, target, peer, stream);
+                    return Ok(());
+                }
+                // Closed while idle: once on a new connection, if the
+                // request may be repeated.
+                Err(_) if raw.is_empty() && is_idempotent(method(&sent.request)) => {
+                    sent.applied.retain(|a| *a != Applied::ReusedConnection);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let mut stream = self.connect(sent).await?;
+        let keep = self.round_trip(&mut stream, sent, raw).await?;
+        if reuse {
+            self.keep(keep, sent.target.clone(), sent.peer, stream);
+        }
+        Ok(())
+    }
+
+    fn keep(&self, keep: bool, target: SendTarget, peer: Option<SocketAddr>, stream: Box<dyn Io>) {
+        if keep {
+            *self.idle.lock().expect("not poisoned") = Some((target, peer, stream));
+        }
+    }
+
+    async fn connect(&self, sent: &mut Sent) -> Result<Box<dyn Io>, String> {
+        let target = &sent.target;
         let addrs = self.resolve(target, &mut sent.timings).await?;
         let started = Instant::now();
         let tcp = timeout(self.connect_timeout, TcpStream::connect(&addrs[..]))
@@ -143,7 +280,7 @@ impl Sender {
         sent.peer = tcp.peer_addr().ok();
         let _ = tcp.set_nodelay(true);
         if !target.tls {
-            return self.round_trip(tcp, request, sent, raw).await;
+            return Ok(Box::new(tcp));
         }
 
         let name = self
@@ -158,7 +295,7 @@ impl Sender {
             .await
             .map_err(|e| format!("TLS handshake with {} failed: {e}", authority(target)))?;
         sent.timings.tls = Some(started.elapsed());
-        self.round_trip(tls, request, sent, raw).await
+        Ok(Box::new(tls))
     }
 
     /// The addresses to try, from `--resolve` or DNS.
@@ -190,13 +327,16 @@ impl Sender {
         Ok(addrs)
     }
 
-    async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
+    /// Sends the request and reads the response; returns whether the
+    /// connection can carry another request.
+    async fn round_trip<S: AsyncRead + AsyncWrite + Unpin + ?Sized>(
         &self,
-        mut stream: S,
-        request: &[u8],
+        stream: &mut S,
         sent: &mut Sent,
         raw: &mut BytesMut,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let request = sent.request.clone();
+        let request = &request[..];
         stream
             .write_all(request)
             .await
@@ -205,7 +345,7 @@ impl Sender {
         let written = Instant::now();
         // The method decides how a response is framed (HEAD); a malformed
         // request may have none.
-        let method = request.split(|&b| b == b' ').next().unwrap_or_default();
+        let method = method(request);
         let (mut start, mut eof) = (0, false);
         loop {
             // At EOF, parsing never needs more: it returns a response or fails.
@@ -217,8 +357,15 @@ impl Sender {
                 let interim = matches!(response.head().status_code(), Some(100..=199))
                     && response.framing().framing != Framing::Tunnel;
                 if !interim {
+                    let keep = start == raw.len()
+                        && response.framing().framing != Framing::UntilClose
+                        && keep_alive(response.head(), response.head().version())
+                        && RequestHead::parse(request, &self.limits)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|h| keep_alive(&h, h.version().unwrap_or_default()));
                     sent.response = Some(response);
-                    return Ok(());
+                    return Ok(keep);
                 }
                 sent.interim.push(response);
             }
@@ -234,6 +381,26 @@ impl Sender {
             }
         }
     }
+}
+
+/// The method: the first word, which a malformed request may lack.
+fn method(request: &[u8]) -> &[u8] {
+    request.split(|&b| b == b' ').next().unwrap_or_default()
+}
+
+fn in_scope(scope: &Scope, target: &SendTarget, request: &[u8]) -> bool {
+    let line = request.split(|&b| b == b'\n').next().unwrap_or_default();
+    let path = String::from_utf8_lossy(line.split(|&b| b == b' ').nth(1).unwrap_or(b"/"));
+    scope.contains(&ScopeTarget {
+        scheme: if target.tls {
+            Scheme::Https
+        } else {
+            Scheme::Http
+        },
+        host: &target.host,
+        port: target.port,
+        path: &path,
+    })
 }
 
 fn authority(target: &SendTarget) -> String {
