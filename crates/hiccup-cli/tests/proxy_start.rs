@@ -102,8 +102,7 @@ fn foreground_proxy_forwards_a_request() {
         .unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
+    stop(&data, child);
 
     assert!(
         response.ends_with(b"\r\n\r\nhi"),
@@ -132,12 +131,102 @@ fn listening_beyond_loopback_warns() {
                 break;
             }
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        stop(&data, child);
         warned
     };
     assert!(warned("0.0.0.0:0"));
     assert!(!warned("127.0.0.1:0"));
+}
+
+/// Stops a foreground proxy the way a user would, so that it exits normally
+/// (a killed process writes no coverage data).
+fn stop(data: &tempfile::TempDir, mut child: std::process::Child) {
+    let stopped = hiccup(data).args(["instance", "stop"]).output().unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert!(child.wait().unwrap().success());
+}
+
+/// The start lines of a foreground proxy, then stops it.
+fn start_lines(data: &tempfile::TempDir, args: &[&str]) -> String {
+    let mut child = hiccup(data)
+        .args(["proxy", "start", "--foreground"])
+        .args(args)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut lines = String::new();
+    while !lines.contains("Press Ctrl+C") {
+        assert!(stderr.read_line(&mut lines).unwrap() > 0, "{lines}");
+    }
+    stop(data, child);
+    lines
+}
+
+#[test]
+fn saved_defaults_apply_and_flags_win() {
+    let data = tempfile::tempdir().unwrap();
+    let config = |args: &[&str]| {
+        let out = hiccup(&data).arg("config").args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    };
+    config(&["set", "proxy.listen", "127.0.0.1:0"]);
+    config(&["set", "proxy.verify-upstream", "true"]);
+    let lines = start_lines(&data, &[]);
+    assert!(lines.contains("listening on http://127.0.0.1:"), "{lines}");
+    assert!(
+        lines.contains("Upstream certificates are verified"),
+        "{lines}"
+    );
+
+    // A flag given wins over the saved default.
+    let lines = start_lines(&data, &["--listen", "[::1]:0"]);
+    assert!(lines.contains("listening on http://[::1]:"), "{lines}");
+
+    config(&["unset", "proxy.verify-upstream"]);
+    let lines = start_lines(&data, &[]);
+    assert!(
+        lines.contains("WARNING: upstream certificates are not verified"),
+        "{lines}"
+    );
+
+    // Reading the settings, as text and as JSON.
+    let get = |args: &[&str]| hiccup(&data).arg("config").args(args).output().unwrap();
+    let all = String::from_utf8(get(&["get"]).stdout).unwrap();
+    assert!(all.contains("proxy.listen = 127.0.0.1:0"), "{all}");
+    assert!(all.contains("proxy.verify-upstream = (not set)"), "{all}");
+    let one = get(&["get", "proxy.listen"]);
+    assert_eq!(String::from_utf8(one.stdout).unwrap(), "127.0.0.1:0\n");
+    let json = hiccup(&data)
+        .args(["--json", "config", "get"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(json["proxy.listen"], serde_json::json!(["127.0.0.1:0"]));
+    let unset = hiccup(&data)
+        .args(["--json", "config", "get", "project"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(unset.stdout).unwrap().trim(), "null");
+
+    // Usage errors (2), and a damaged file (1).
+    for args in [
+        &["set", "colour", "red"][..],
+        &["get", "colour"],
+        &["unset", "colour"],
+    ] {
+        assert_eq!(get(args).status.code(), Some(2), "{args:?}");
+    }
+    assert_eq!(
+        get(&["set", "proxy.verify-upstream", "maybe"])
+            .status
+            .code(),
+        Some(2)
+    );
+    std::fs::write(data.path().join("config.json"), b"not json").unwrap();
+    let damaged = get(&["get"]);
+    assert_eq!(damaged.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("is not valid"));
 }
 
 #[test]

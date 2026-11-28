@@ -3,6 +3,7 @@
 //! `hiccup`: the command-line interface to Hiccup.
 
 mod ca;
+mod config;
 mod events;
 mod history;
 mod instance;
@@ -14,7 +15,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use hiccup_control::Registry;
 use tracing_subscriber::EnvFilter;
 
@@ -30,6 +31,10 @@ struct Cli {
     /// Increase log verbosity (-v: debug, -vv: trace). `RUST_LOG` overrides it.
     #[arg(short, long, action = ArgAction::Count, global = true)]
     verbose: u8,
+
+    /// Log errors only.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
 
     /// Print results as JSON, for scripts.
     #[arg(long, global = true)]
@@ -56,7 +61,8 @@ struct Cli {
 
     /// The project file (`.hiccup`) an instance started by this command
     /// (`serve`, `proxy start --foreground`) records history in; created if
-    /// needed. Without it, history is not recorded.
+    /// needed. Defaults to `project` (see `hiccup config`); without either,
+    /// history is not recorded.
     #[arg(long, value_name = "FILE", global = true)]
     project: Option<PathBuf>,
 
@@ -91,6 +97,20 @@ enum Command {
     /// Local certificate authority for HTTPS interception.
     #[command(subcommand)]
     Ca(ca::CaCommand),
+    /// Defaults for flags, saved in the data directory.
+    #[command(subcommand)]
+    Config(config::ConfigCommand),
+    /// Print a shell completion script, e.g. `hiccup completions zsh`.
+    Completions {
+        /// The shell.
+        shell: clap_complete::Shell,
+    },
+    /// Write the man pages (hiccup.1, hiccup-proxy.1, ...) to a directory.
+    Man {
+        /// Where to write them.
+        #[arg(long, value_name = "DIR")]
+        output: PathBuf,
+    },
 }
 
 /// Options shared by every command.
@@ -116,6 +136,15 @@ impl Globals {
     }
 
     /// The instance registry.
+    /// The saved defaults (`hiccup config`), or `None` after explaining why
+    /// they cannot be read.
+    fn config(&self) -> Option<config::Config> {
+        let dir = self.data_dir()?;
+        config::Config::load(&dir)
+            .map_err(|e| eprintln!("hiccup: {e}"))
+            .ok()
+    }
+
     fn registry(&self) -> Option<Registry> {
         let dir = self.runtime_dir.clone().or_else(Registry::default_dir);
         if dir.is_none() {
@@ -127,7 +156,7 @@ impl Globals {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
+    init_logging(cli.verbose, cli.quiet);
     let globals = Globals {
         json: cli.json,
         instance: cli.instance,
@@ -143,6 +172,28 @@ fn main() -> ExitCode {
         Command::Events(args) => events::run(&args, &globals),
         Command::History(command) => history::run(command, &globals),
         Command::Instance(command) => instance::run(command, &globals),
+        Command::Config(command) => match globals.data_dir() {
+            Some(dir) => config::run(command, &dir, globals.json),
+            None => ExitCode::FAILURE,
+        },
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "hiccup", &mut std::io::stdout());
+            ExitCode::SUCCESS
+        }
+        Command::Man { output } => {
+            let written = std::fs::create_dir_all(&output)
+                .and_then(|()| clap_mangen::generate_to(Cli::command(), &output));
+            match written {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!(
+                        "hiccup: cannot write the man pages to {}: {e}",
+                        output.display()
+                    );
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Ca(command) => match globals.data_dir() {
             Some(dir) => ca::run(command, &dir, globals.json),
             None => ExitCode::FAILURE,
@@ -165,8 +216,9 @@ fn print_json(value: &serde_json::Value) {
     );
 }
 
-fn init_logging(verbose: u8) {
+fn init_logging(verbose: u8, quiet: bool) {
     let default = match verbose {
+        _ if quiet => "error",
         0 => "warn,hiccup_proxy=info,hiccup_cli=info",
         1 => "info,hiccup_proxy=debug,hiccup_cli=debug",
         _ => "trace",

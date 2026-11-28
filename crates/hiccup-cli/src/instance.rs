@@ -60,8 +60,11 @@ where
             }
         };
         let record = registration.record().clone();
+        let Some(config) = globals.config() else {
+            return ExitCode::FAILURE;
+        };
         let instance = Instance::new(name, data_dir);
-        if let Some(project) = &globals.project {
+        if let Some(project) = &globals.project.clone().or_else(|| config.project()) {
             if let Err(e) = instance.open_project(project) {
                 eprintln!("hiccup: cannot open the project {}: {e}", project.display());
                 return ExitCode::FAILURE;

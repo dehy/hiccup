@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- CLI: `hiccup config get|set|unset` saves defaults for `--project`, `proxy start --listen` and `--verify-upstream` (flags win); `-q` logs errors only; `hiccup completions <shell>` (bash, zsh, fish, PowerShell) and `hiccup man --output DIR` generate completions and man pages. Exit codes are documented in `docs/cli.md`: 0 success, 1 failure, 2 usage error.
 - History recording. `--project FILE` makes an instance started by `hiccup serve` or `hiccup proxy start --foreground` record every exchange in that project file, which survives restarts. Exchanges are queued, so the proxy never waits on the disk; a queue that falls behind drops (with a warning) rather than slows the proxy.
   - Control API: `history.list` (filters, newest first, paginated) and `history.show` (the exact bytes, base64-encoded). `instance.info` gives the open project.
   - CLI: `hiccup history list|show|export`. `show --request` / `--response` write the exact bytes when redirected; `export` writes every matching exchange as one JSON object per line.

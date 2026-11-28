@@ -11,9 +11,10 @@ use clap::{Args, Subcommand};
 use hiccup_control::api::{
     ClientCertRule, HostRule, ProxyStartParams, ProxyStartResult, ProxyStatus, method,
 };
-use hiccup_proxy::{ClientCert, HostPattern, TlsVersion};
+use hiccup_proxy::{ClientCert, HostPattern, ProxyConfig, TlsVersion};
 
 use crate::Globals;
+use crate::config::Config;
 use crate::instance::{self, Hosted};
 
 #[derive(Debug, Subcommand)]
@@ -36,7 +37,8 @@ pub struct StartArgs {
     foreground: bool,
 
     /// Address to listen on. Repeat to listen on several addresses.
-    #[arg(long = "listen", value_name = "ADDR", default_value = "127.0.0.1:8080")]
+    /// Default: `proxy.listen` (see `hiccup config`), or 127.0.0.1:8080.
+    #[arg(long = "listen", value_name = "ADDR")]
     listen: Vec<SocketAddr>,
 
     /// Relay HTTPS to matching hosts without intercepting it, e.g. for clients
@@ -48,7 +50,8 @@ pub struct StartArgs {
     /// Verify upstream server certificates against the OS trust store.
     ///
     /// Off by default, so that targets with self-signed or invalid
-    /// certificates can be tested.
+    /// certificates can be tested; `proxy.verify-upstream` (see
+    /// `hiccup config`) changes the default.
     #[arg(long, help_heading = "Upstream")]
     verify_upstream: bool,
 
@@ -105,20 +108,25 @@ pub struct StartArgs {
 }
 
 impl StartArgs {
-    fn params(&self) -> ProxyStartParams {
+    /// The parameters, with unset flags taken from `config`.
+    fn params(&self, config: &Config) -> ProxyStartParams {
         let millis = |d: Duration| Some(u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let rule = |(host, value): &(HostPattern, String)| HostRule {
             host: host.to_string(),
             value: value.clone(),
         };
         ProxyStartParams {
-            listen: self.listen.iter().map(ToString::to_string).collect(),
+            listen: match (self.listen.as_slice(), config.listen()) {
+                ([], saved) if saved.is_empty() => vec![ProxyConfig::DEFAULT_LISTEN.to_string()],
+                ([], saved) => saved.iter().map(ToString::to_string).collect(),
+                (given, _) => given.iter().map(ToString::to_string).collect(),
+            },
             tls_passthrough: self
                 .tls_passthrough
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
-            verify_upstream: self.verify_upstream,
+            verify_upstream: self.verify_upstream || config.verify_upstream(),
             upstream_tls_min: Some(self.upstream_tls_min.to_string()),
             upstream_tls_max: Some(self.upstream_tls_max.to_string()),
             upstream_sni: self.upstream_sni.iter().map(rule).collect(),
@@ -195,22 +203,12 @@ fn parse_seconds(s: &str) -> Result<Duration, String> {
 pub fn run(command: ProxyCommand, globals: &Globals) -> ExitCode {
     match command {
         ProxyCommand::Start(args) if args.foreground => foreground(&args, globals),
-        ProxyCommand::Start(args) => instance::call(globals, |client| {
-            Box::pin(async move {
-                let result: ProxyStartResult =
-                    client.call(method::PROXY_START, args.params()).await?;
-                Ok(serde_json::to_value(result).expect("serializes"))
-            })
-        })
-        .map_or(ExitCode::FAILURE, |value| {
-            if globals.json {
-                crate::print_json(&value);
-            } else {
-                let result: ProxyStartResult = serde_json::from_value(value).expect("typed");
-                print_started(&result);
-            }
-            ExitCode::SUCCESS
-        }),
+        ProxyCommand::Start(args) => {
+            let Some(config) = globals.config() else {
+                return ExitCode::FAILURE;
+            };
+            start(globals, args.params(&config))
+        }
         ProxyCommand::Stop => instance::call(globals, |client| {
             Box::pin(async move { client.call_value(method::PROXY_STOP, ()).await })
         })
@@ -288,12 +286,35 @@ fn print_status(status: &ProxyStatus) {
     println!("Exchanges:    {}", status.exchanges);
 }
 
+/// `proxy start`: start the proxy of the running instance.
+fn start(globals: &Globals, params: ProxyStartParams) -> ExitCode {
+    instance::call(globals, |client| {
+        Box::pin(async move {
+            let result: ProxyStartResult = client.call(method::PROXY_START, params).await?;
+            Ok(serde_json::to_value(result).expect("serializes"))
+        })
+    })
+    .map_or(ExitCode::FAILURE, |value| {
+        if globals.json {
+            crate::print_json(&value);
+        } else {
+            let result: ProxyStartResult = serde_json::from_value(value).expect("typed");
+            print_started(&result);
+        }
+        ExitCode::SUCCESS
+    })
+}
+
 /// `proxy start --foreground`: host an instance, start its proxy, and run
 /// until Ctrl+C, `hiccup proxy stop` or `hiccup instance stop`.
 fn foreground(args: &StartArgs, globals: &Globals) -> ExitCode {
+    let Some(config) = globals.config() else {
+        return ExitCode::FAILURE;
+    };
+    let params = args.params(&config);
     instance::host(globals, |hosted: Hosted| {
         Box::pin(async move {
-            let result = match hosted.instance.start_proxy(args.params()).await {
+            let result = match hosted.instance.start_proxy(params).await {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("hiccup: {}", e.message);
