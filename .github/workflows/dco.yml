@@ -21,10 +21,16 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           missing=0
           for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
             author_email="$(git log -1 --format='%ae' "$sha")"
+            # Dependabot cannot sign off. Its own commits, in a pull request it
+            # opened (the PR author cannot be forged), are exempt.
+            if [[ $PR_AUTHOR == 'dependabot[bot]' && $author_email == '49699333+dependabot[bot]@users.noreply.github.com' ]]; then
+              continue
+            fi
             if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$sha" | grep -Fqi "<$author_email>"; then
               echo "::error::Commit $sha ($(git log -1 --format='%s' "$sha")) has no 'Signed-off-by' matching its author <$author_email>."
               missing=1
