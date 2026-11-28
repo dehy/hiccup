@@ -637,7 +637,10 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
 // shortcut: a streamed body is sent before the response is read, so a
 // `100 Continue` reaches the client only after it sent the body anyway
 // (clients wait a second, then send it); relay it early if that matters.
-#[expect(clippy::too_many_arguments, reason = "one call site, all distinct state")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call site, all distinct state"
+)]
 async fn round_trip<S: AsyncRead + AsyncWrite + Unpin>(
     client: &mut S,
     mut body: Option<&mut BytesMut>,
