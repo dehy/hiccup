@@ -257,7 +257,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[tokio::test]
 async fn https_is_intercepted_with_a_certificate_from_the_ca() {
     let origin = TlsOrigin::start().await;
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
     let target = format!("localhost:{}", origin.addr.port());
 
     let tunnel = h.connect(&target).await;
@@ -289,7 +289,7 @@ async fn https_is_intercepted_with_a_certificate_from_the_ca() {
 #[tokio::test]
 async fn an_ip_target_without_sni_gets_an_ip_certificate() {
     let origin = TlsOrigin::start().await;
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
 
     let tunnel = h.connect(&origin.addr.to_string()).await;
     let ca_cert = CertificateDer::from(h.ca.cert_der().to_vec());
@@ -323,7 +323,7 @@ async fn an_unreachable_upstream_gets_a_502_inside_the_tunnel() {
     let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = closed.local_addr().unwrap().port();
     drop(closed);
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
 
     let tunnel = h.connect(&format!("localhost:{port}")).await;
     let ca_cert = CertificateDer::from(h.ca.cert_der().to_vec());
@@ -353,7 +353,7 @@ async fn a_tunnel_without_tls_is_relayed() {
             .await
             .unwrap();
     });
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
 
     let mut tunnel = h.connect(&addr.to_string()).await;
     let r = exchange(&mut tunnel, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
@@ -364,7 +364,7 @@ async fn a_tunnel_without_tls_is_relayed() {
 #[tokio::test]
 async fn a_client_that_rejects_the_certificate_does_not_break_the_proxy() {
     let origin = TlsOrigin::start().await;
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
     let target = format!("localhost:{}", origin.addr.port());
 
     // This client trusts only the origin's certificate, not the CA.
@@ -394,7 +394,7 @@ async fn curl_trusts_the_intercepted_certificate() {
         return;
     }
     let origin = TlsOrigin::start().await;
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
     let dir = tempfile::tempdir().unwrap();
     let ca_file = dir.path().join("hiccup.pem");
     std::fs::write(&ca_file, h.ca.cert_pem()).unwrap();
@@ -427,7 +427,7 @@ async fn a_request_inside_the_tunnel_can_be_held_and_edited() {
         requests: Some(InterceptRules::default()),
         ..InterceptSettings::default()
     });
-    let h = Harness::start_with(ProxyConfig::default(), queue.clone()).await;
+    let h = Harness::start_with(with_upstream(insecure()), queue.clone()).await;
     let tunnel = h
         .connect(&format!("localhost:{}", origin.addr.port()))
         .await;
@@ -493,6 +493,14 @@ async fn get(h: &Harness, target: &str, server_name: &str, path: &str) -> Respon
     exchange(&mut tls, request.as_bytes()).await
 }
 
+/// The test origins have self-signed certificates.
+fn insecure() -> UpstreamConfig {
+    UpstreamConfig {
+        verify: false,
+        ..UpstreamConfig::default()
+    }
+}
+
 fn with_upstream(upstream: UpstreamConfig) -> ProxyConfig {
     ProxyConfig {
         upstream,
@@ -507,7 +515,7 @@ async fn verification_rejects_an_untrusted_upstream() {
 
     let h = Harness::start(with_upstream(UpstreamConfig {
         verify: true,
-        ..UpstreamConfig::default()
+        ..insecure()
     }))
     .await;
     let r = get(&h, &target, "localhost", "/").await;
@@ -519,7 +527,7 @@ async fn verification_rejects_an_untrusted_upstream() {
     );
 
     // Off by default: the self-signed origin is accepted.
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
     let r = get(&h, &target, "localhost", "/").await;
     assert_eq!(r.head().status_code(), Some(200));
 }
@@ -530,7 +538,7 @@ async fn sni_can_be_overridden_per_host() {
     let h = Harness::start(with_upstream(UpstreamConfig {
         sni: vec![("*.test".parse().unwrap(), "override.example".into())],
         resolve: vec![("app.test".parse().unwrap(), "127.0.0.1".parse().unwrap())],
-        ..UpstreamConfig::default()
+        ..insecure()
     }))
     .await;
     let target = format!("app.test:{}", origin.addr.port());
@@ -546,7 +554,7 @@ async fn resolve_overrides_dns() {
             "Target.Invalid".parse().unwrap(),
             "127.0.0.1".parse().unwrap(),
         )],
-        ..UpstreamConfig::default()
+        ..insecure()
     }))
     .await;
     // `.invalid` never resolves (RFC 6761): only the override can reach it.
@@ -560,7 +568,7 @@ async fn tls_versions_can_be_limited() {
     let origin = TlsOrigin::start().await;
     let target = format!("localhost:{}", origin.addr.port());
 
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
     assert_eq!(
         header(&get(&h, &target, "localhost", "/").await, "x-tls"),
         "1.3"
@@ -568,7 +576,7 @@ async fn tls_versions_can_be_limited() {
 
     let h = Harness::start(with_upstream(UpstreamConfig {
         tls_max: TlsVersion::Tls12,
-        ..UpstreamConfig::default()
+        ..insecure()
     }))
     .await;
     assert_eq!(
@@ -582,7 +590,7 @@ async fn tls_versions_can_be_limited() {
         upstream: UpstreamConfig {
             tls_min: TlsVersion::Tls13,
             tls_max: TlsVersion::Tls12,
-            ..UpstreamConfig::default()
+            ..insecure()
         },
         ..ProxyConfig::default()
     })
@@ -618,13 +626,13 @@ async fn client_certificates_are_presented_per_host() {
 
     let h = Harness::start(with_upstream(UpstreamConfig {
         client_certs: vec![("localhost".parse().unwrap(), client)],
-        ..UpstreamConfig::default()
+        ..insecure()
     }))
     .await;
     let r = get(&h, &target, "localhost", "/").await;
     assert_eq!(header(&r, "x-client-cert"), "yes");
 
-    let h = Harness::start(ProxyConfig::default()).await;
+    let h = Harness::start(with_upstream(insecure())).await;
     let r = get(&h, &target, "localhost", "/").await;
     assert_eq!(header(&r, "x-client-cert"), "no");
 }
@@ -644,7 +652,7 @@ async fn upstream_timeouts_answer_502() {
     let h = Harness::start(ProxyConfig {
         connect_timeout: std::time::Duration::from_millis(300),
         read_timeout: std::time::Duration::from_millis(300),
-        ..ProxyConfig::default()
+        ..with_upstream(insecure())
     })
     .await;
 

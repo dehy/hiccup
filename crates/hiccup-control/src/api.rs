@@ -120,7 +120,7 @@ pub struct ProxyStartParams {
     pub listen: Vec<String>,
     /// Host patterns whose HTTPS is relayed without interception.
     pub tls_passthrough: Vec<String>,
-    /// Verify upstream certificates against the OS trust store.
+    /// Verify upstream certificates against the OS trust store. Default `true`.
     pub verify_upstream: bool,
     /// Lowest upstream TLS version, `"1.2"` or `"1.3"`. Default `"1.2"`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,7 +147,7 @@ impl Default for ProxyStartParams {
         Self {
             listen: vec!["127.0.0.1:8080".to_owned()],
             tls_passthrough: Vec::new(),
-            verify_upstream: false,
+            verify_upstream: true,
             upstream_tls_min: None,
             upstream_tls_max: None,
             upstream_sni: Vec::new(),
@@ -521,7 +521,7 @@ fn example_status() -> ProxyStatus {
     ProxyStatus {
         running: true,
         listen: vec!["127.0.0.1:8080".to_owned()],
-        verify_upstream: false,
+        verify_upstream: true,
         exchanges: 42,
     }
 }

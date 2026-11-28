@@ -59,7 +59,7 @@ fn foreground_proxy_forwards_a_request() {
     let mut child = hiccup(&data)
         .args(["proxy", "start", "--foreground", "--listen", "127.0.0.1:0"])
         // Every upstream option, to check that they parse and start.
-        .args(["--resolve", "origin.test=127.0.0.1", "--verify-upstream"])
+        .args(["--resolve", "origin.test=127.0.0.1", "--no-verify-upstream"])
         .args(["--upstream-tls-min", "1.3", "--upstream-tls-max", "1.3"])
         .args([
             "--upstream-sni",
@@ -171,11 +171,11 @@ fn saved_defaults_apply_and_flags_win() {
         assert!(out.status.success(), "{args:?}: {out:?}");
     };
     config(&["set", "proxy.listen", "127.0.0.1:0"]);
-    config(&["set", "proxy.verify-upstream", "true"]);
+    config(&["set", "proxy.verify-upstream", "false"]);
     let lines = start_lines(&data, &[]);
     assert!(lines.contains("listening on http://127.0.0.1:"), "{lines}");
     assert!(
-        lines.contains("Upstream certificates are verified"),
+        lines.contains("WARNING: upstream certificates are not verified"),
         "{lines}"
     );
 
@@ -185,6 +185,11 @@ fn saved_defaults_apply_and_flags_win() {
 
     config(&["unset", "proxy.verify-upstream"]);
     let lines = start_lines(&data, &[]);
+    assert!(
+        lines.contains("Upstream certificates are verified"),
+        "{lines}"
+    );
+    let lines = start_lines(&data, &["--no-verify-upstream"]);
     assert!(
         lines.contains("WARNING: upstream certificates are not verified"),
         "{lines}"

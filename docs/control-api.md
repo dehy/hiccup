@@ -79,7 +79,7 @@ Parameters:
     "*.mozilla.com"
   ],
   "upstream_sni": [],
-  "verify_upstream": false
+  "verify_upstream": true
 }
 ```
 
@@ -95,7 +95,7 @@ Result:
       "127.0.0.1:8080"
     ],
     "running": true,
-    "verify_upstream": false
+    "verify_upstream": true
   }
 }
 ```
@@ -150,7 +150,7 @@ Result:
     "127.0.0.1:8080"
   ],
   "running": true,
-  "verify_upstream": false
+  "verify_upstream": true
 }
 ```
 
@@ -650,7 +650,7 @@ Parameters:
     "127.0.0.1:8080"
   ],
   "running": true,
-  "verify_upstream": false
+  "verify_upstream": true
 }
 ```
 

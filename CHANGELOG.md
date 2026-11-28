@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Repeater helpers (`hiccup_proxy::Helpers`), all off by default: update `Content-Length` to the body, follow redirects (never, always or in scope only, up to a limit; 303, and 301/302 after a `POST`, become a `GET`; a redirect to another origin drops `Authorization`, `Cookie` and `Proxy-Authorization`), and reuse the connection between sends (retried once on a new one if it was closed while idle). Each send says which helpers changed it (`Sent::applied`) and keeps the bytes it really sent. With the helpers off, the bytes sent are the bytes given.
 - Raw request sender (`hiccup_proxy::Sender`), the base of the repeater: it sends exactly the bytes given, malformed or not, to a target (host, port, TLS) set apart from the `Host` header, with the proxy's upstream options (TLS versions, verification, SNI, `--resolve`, client certificates). It reads the response with the codec, interim responses included, and keeps every byte received, the timings (DNS, connect, TLS, time to first byte, total) and why it failed. A send can be cancelled, and each step has a timeout.
-- CLI: `hiccup config get|set|unset` saves defaults for `--project`, `proxy start --listen` and `--verify-upstream` (flags win); `-q` logs errors only; `hiccup completions <shell>` (bash, zsh, fish, PowerShell) and `hiccup man --output DIR` generate completions and man pages. Exit codes are documented in `docs/cli.md`: 0 success, 1 failure, 2 usage error.
+- CLI: `hiccup config get|set|unset` saves defaults for `--project`, `proxy start --listen` and `--no-verify-upstream` (flags win); `-q` logs errors only; `hiccup completions <shell>` (bash, zsh, fish, PowerShell) and `hiccup man --output DIR` generate completions and man pages. Exit codes are documented in `docs/cli.md`: 0 success, 1 failure, 2 usage error.
 - History recording. `--project FILE` makes an instance started by `hiccup serve` or `hiccup proxy start --foreground` record every exchange in that project file, which survives restarts. Exchanges are queued, so the proxy never waits on the disk; a queue that falls behind drops (with a warning) rather than slows the proxy.
   - Control API: `history.list` (filters, newest first, paginated) and `history.show` (the exact bytes, base64-encoded). `instance.info` gives the open project.
   - CLI: `hiccup history list|show|export`. `show --request` / `--response` write the exact bytes when redirected; `export` writes every matching exchange as one JSON object per line.
@@ -40,7 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Global options: `--instance NAME` (`HICCUP_INSTANCE`), `--json`, and `--runtime-dir` (`HICCUP_RUNTIME_DIR`).
   - `hiccup ca info --json`.
 - Upstream connection options for `hiccup proxy start`:
-  - `--verify-upstream` verifies server certificates against the OS trust store. It is off by default, and startup warns about it.
+  - Upstream server certificates are verified against the OS trust store by default (`UpstreamConfig::default()`, `proxy.start`). `--no-verify-upstream` turns verification off, to test targets with self-signed or invalid certificates, and startup warns about it.
   - `--upstream-tls-min` and `--upstream-tls-max` take 1.2 or 1.3; rustls cannot reach TLS 1.0/1.1-only servers.
   - Per-host rules, `HOST=VALUE`, with the same patterns as `--tls-passthrough`; the first match applies:
     - `--upstream-sni` overrides the server name;
@@ -49,7 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `--connect-timeout` and `--read-timeout`, in seconds.
 - HTTPS interception in `CONNECT` tunnels.
   - The client gets a certificate for the host (from SNI, else the `CONNECT` target; DNS name or IP), signed by the local CA and cached per host. ALPN is limited to `http/1.1`.
-  - Requests inside the tunnel are forwarded as received, over TLS, and recorded like plain ones (`Exchange::tls`). Upstream certificates are not verified yet (#11).
+  - Requests inside the tunnel are forwarded as received, over TLS, and recorded like plain ones (`Exchange::tls`).
   - `hiccup proxy start --tls-passthrough PATTERN` (`host`, `*.example.com` or `*`) relays matching hosts untouched, as are tunnels that do not carry TLS.
 - Local certificate authority for HTTPS interception: an ECDSA P-256 root CA, generated per installation on first use and stored in the per-user data directory with an owner-only private key.
   - `hiccup ca info` shows its location, validity and SHA-256 fingerprint.

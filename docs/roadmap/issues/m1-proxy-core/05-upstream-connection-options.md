@@ -8,7 +8,7 @@ Control how Hiccup connects to target servers.
 
 ## Tasks
 
-- [ ] Upstream TLS verification on or off (default: off, matching pentest expectations, with a visible warning)
+- [ ] Upstream TLS verification on or off (default: on; turning it off, for targets with self-signed or invalid certificates, shows a visible warning)
 - [ ] SNI override, minimum/maximum TLS version, optional client certificates
 - [ ] Connect/read timeouts; DNS overrides (hosts map)
 
