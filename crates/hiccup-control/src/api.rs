@@ -52,6 +52,22 @@ pub mod method {
     pub const HISTORY_LIST: &str = "history.list";
     /// Show one recorded exchange, with its bytes.
     pub const HISTORY_SHOW: &str = "history.show";
+    /// List the repeater tabs.
+    pub const REPEATER_LIST: &str = "repeater.list";
+    /// Create a repeater tab.
+    pub const REPEATER_NEW: &str = "repeater.new";
+    /// Show a repeater tab, with its request.
+    pub const REPEATER_SHOW: &str = "repeater.show";
+    /// Change a repeater tab.
+    pub const REPEATER_UPDATE: &str = "repeater.update";
+    /// Close a repeater tab, and forget what was sent from it.
+    pub const REPEATER_CLOSE: &str = "repeater.close";
+    /// Send a tab's request.
+    pub const REPEATER_SEND: &str = "repeater.send";
+    /// List what was sent from a tab.
+    pub const REPEATER_HISTORY: &str = "repeater.history";
+    /// Show one request sent from a tab, with its response.
+    pub const REPEATER_HISTORY_SHOW: &str = "repeater.history_show";
 }
 
 /// Notification names.
@@ -446,6 +462,220 @@ pub struct HistoryItem {
     pub delivered: Option<String>,
 }
 
+/// Where a repeater tab sends, set apart from its request's `Host` header.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeaterTarget {
+    /// A host name or IP address.
+    pub host: String,
+    /// The TCP port.
+    pub port: u16,
+    /// Whether to speak TLS.
+    pub tls: bool,
+}
+
+/// Which redirects a repeater tab follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedirectPolicy {
+    /// None: the redirect is the response.
+    #[default]
+    Never,
+    /// Every redirect.
+    Always,
+    /// Redirects to URLs in scope (see `scope.add`).
+    InScope,
+}
+
+fn default_max_redirects() -> u8 {
+    10
+}
+
+/// A repeater tab's helpers. All are off by default: the bytes sent are then
+/// the request, exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeaterOptions {
+    /// Set `Content-Length` to the length of the body (or add it).
+    #[serde(default)]
+    pub update_content_length: bool,
+    /// Which redirects to follow.
+    #[serde(default)]
+    pub redirects: RedirectPolicy,
+    /// How many redirects to follow at most (default 10).
+    #[serde(default = "default_max_redirects")]
+    pub max_redirects: u8,
+    /// Keep the connection open between sends to the same target.
+    #[serde(default)]
+    pub reuse_connection: bool,
+}
+
+impl Default for RepeaterOptions {
+    fn default() -> Self {
+        Self {
+            update_content_length: false,
+            redirects: RedirectPolicy::Never,
+            max_redirects: default_max_redirects(),
+            reuse_connection: false,
+        }
+    }
+}
+
+/// A repeater tab.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterTab {
+    /// Its ID in the project.
+    pub id: u64,
+    /// What the user calls it.
+    pub name: String,
+    /// Where it sends.
+    pub target: RepeaterTarget,
+    /// Its helpers.
+    pub options: RepeaterOptions,
+    /// The request, base64-encoded; left out of `repeater.list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+}
+
+/// Result of `repeater.list`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterTabs {
+    /// Oldest first.
+    pub tabs: Vec<RepeaterTab>,
+}
+
+/// Parameters of `repeater.new`. With `from_history`, the tab starts from
+/// that exchange (its request as forwarded, and its upstream); the other
+/// parameters, if given, win. Without it, `target` and `request` are needed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeaterNewParams {
+    /// A proxy history ID (see `history.list`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_history: Option<u64>,
+    /// The name; by default, the request's method and target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Where to send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RepeaterTarget>,
+    /// The request, base64-encoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    /// The helpers; all off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<RepeaterOptions>,
+}
+
+/// Parameters of `repeater.update`: what is given changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeaterUpdateParams {
+    /// The tab.
+    pub id: u64,
+    /// A new name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A new target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RepeaterTarget>,
+    /// A new request, base64-encoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    /// New helpers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<RepeaterOptions>,
+}
+
+/// Parameters of `repeater.history`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeaterHistoryParams {
+    /// The tab.
+    pub id: u64,
+    /// Only sends older than this ID: the last one of the previous page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    /// At most this many (default 100, at most 1000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// How long each step of a send took, in microseconds. A step that did not
+/// happen is left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterTimings {
+    /// Resolving the host name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_us: Option<u64>,
+    /// Opening the TCP connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_us: Option<u64>,
+    /// The TLS handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_us: Option<u64>,
+    /// From the end of the request to the first byte of the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_us: Option<u64>,
+    /// The whole send.
+    pub total_us: u64,
+}
+
+/// A request sent from a tab (one per redirect hop), without its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterSendSummary {
+    /// Its ID in the project: higher is newer.
+    pub id: u64,
+    /// The tab it was sent from.
+    pub tab: u64,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub started_ms: u64,
+    /// Where it went.
+    pub target: RepeaterTarget,
+    /// The response status, if a response arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Why it failed, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Size of the request sent, in bytes.
+    pub request_size: u64,
+    /// Size of what was received, in bytes.
+    pub response_size: u64,
+    /// The helpers that changed this send: `content_length_updated`,
+    /// `followed_redirect`, `reused_connection`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<String>,
+    /// How long each step took.
+    pub timings: RepeaterTimings,
+}
+
+/// A request sent from a tab, with its bytes (base64-encoded).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterSendItem {
+    /// The summary.
+    #[serde(flatten)]
+    pub summary: RepeaterSendSummary,
+    /// The bytes sent.
+    pub request: String,
+    /// Every byte received, interim responses included.
+    pub response: String,
+}
+
+/// Result of `repeater.send`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterSent {
+    /// The request, then one per redirect followed.
+    pub sends: Vec<RepeaterSendItem>,
+}
+
+/// Result of `repeater.history`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeaterHistoryPage {
+    /// Newest first.
+    pub items: Vec<RepeaterSendSummary>,
+}
+
 /// `exchange.request`: a request was received, before it is held or
 /// forwarded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -578,6 +808,43 @@ fn example_history() -> HistorySummary {
         error: None,
     }
 }
+
+fn example_tab(request: bool) -> RepeaterTab {
+    RepeaterTab {
+        id: 3,
+        name: "GET /api/items?page=2".to_owned(),
+        target: RepeaterTarget {
+            host: "example.com".to_owned(),
+            port: 443,
+            tls: true,
+        },
+        options: RepeaterOptions::default(),
+        request: request.then(|| "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…".to_owned()),
+    }
+}
+
+fn example_send() -> RepeaterSendSummary {
+    RepeaterSendSummary {
+        id: 17,
+        tab: 3,
+        started_ms: 1_764_000_000_000,
+        target: example_tab(false).target,
+        status: Some(200),
+        error: None,
+        request_size: 412,
+        response_size: 5321,
+        applied: Vec::new(),
+        timings: RepeaterTimings {
+            dns_us: Some(1_204),
+            connect_us: Some(18_311),
+            tls_us: Some(36_870),
+            ttfb_us: Some(52_007),
+            total_us: 109_532,
+        },
+    }
+}
+
+const NO_TAB: (i64, &str) = (-32602, "no repeater tab has this ID");
 
 const NO_PROJECT: (i64, &str) = (
     -32001,
@@ -799,6 +1066,122 @@ pub const METHODS: &[MessageDoc] = &[
         errors: &[NO_PROJECT, (-32602, "no recorded exchange has this ID")],
     },
     MessageDoc {
+        name: method::REPEATER_LIST,
+        summary: "List the repeater tabs of the project, without their requests.",
+        params: || json!({}),
+        result: || {
+            to_value(&RepeaterTabs {
+                tabs: vec![example_tab(false)],
+            })
+        },
+        errors: &[NO_PROJECT],
+    },
+    MessageDoc {
+        name: method::REPEATER_NEW,
+        summary: "Create a repeater tab, from a proxy history item (`from_history`) or from a \
+                  target and a raw request. It is kept in the project.",
+        params: || {
+            to_value(&RepeaterNewParams {
+                from_history: Some(42),
+                ..RepeaterNewParams::default()
+            })
+        },
+        result: || to_value(&example_tab(true)),
+        errors: &[
+            NO_PROJECT,
+            (-32602, "no recorded exchange has this ID"),
+            (
+                -32602,
+                "`target` and `request` are needed without `from_history`",
+            ),
+            (-32602, "`request` is not valid base64"),
+        ],
+    },
+    MessageDoc {
+        name: method::REPEATER_SHOW,
+        summary: "Show a repeater tab, with its request.",
+        params: || to_value(&ItemParams { id: 3 }),
+        result: || to_value(&example_tab(true)),
+        errors: &[NO_PROJECT, NO_TAB],
+    },
+    MessageDoc {
+        name: method::REPEATER_UPDATE,
+        summary: "Change a repeater tab's name, target, request or helpers. To go back to an \
+                  earlier request, set `request` to one from `repeater.history_show`.",
+        params: || {
+            to_value(&RepeaterUpdateParams {
+                id: 3,
+                name: Some("items, page 2".to_owned()),
+                target: None,
+                request: None,
+                options: Some(RepeaterOptions {
+                    update_content_length: true,
+                    ..RepeaterOptions::default()
+                }),
+            })
+        },
+        result: || to_value(&example_tab(true)),
+        errors: &[
+            NO_PROJECT,
+            NO_TAB,
+            (-32602, "`request` is not valid base64"),
+        ],
+    },
+    MessageDoc {
+        name: method::REPEATER_CLOSE,
+        summary: "Close a repeater tab, and forget what was sent from it.",
+        params: || to_value(&ItemParams { id: 3 }),
+        result: || json!({}),
+        errors: &[NO_PROJECT, NO_TAB],
+    },
+    MessageDoc {
+        name: method::REPEATER_SEND,
+        summary: "Send a tab's request to its target, with its helpers, and record it in the \
+                  tab's history. Without helpers, the bytes sent are the request, exactly. A \
+                  failed send is recorded too, with its `error`.",
+        params: || to_value(&ItemParams { id: 3 }),
+        result: || {
+            to_value(&RepeaterSent {
+                sends: vec![RepeaterSendItem {
+                    summary: example_send(),
+                    request: "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…".to_owned(),
+                    response: "SFRUUC8xLjEgMjAwIE9LDQo…".to_owned(),
+                }],
+            })
+        },
+        errors: &[NO_PROJECT, NO_TAB],
+    },
+    MessageDoc {
+        name: method::REPEATER_HISTORY,
+        summary: "List what was sent from a tab, newest first, one item per redirect hop.",
+        params: || {
+            to_value(&RepeaterHistoryParams {
+                id: 3,
+                before: None,
+                limit: Some(50),
+            })
+        },
+        result: || {
+            to_value(&RepeaterHistoryPage {
+                items: vec![example_send()],
+            })
+        },
+        errors: &[NO_PROJECT, NO_TAB, (-32602, "`limit` is above 1000")],
+    },
+    MessageDoc {
+        name: method::REPEATER_HISTORY_SHOW,
+        summary: "Show one request sent from a tab, with its response.",
+        params: || to_value(&ItemParams { id: 17 }),
+        result: || {
+            to_value(&RepeaterSendItem {
+                summary: example_send(),
+                request: "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…".to_owned(),
+                response: "SFRUUC8xLjEgMjAwIE9LDQo…".to_owned(),
+            })
+        },
+        errors: &[NO_PROJECT, (-32602, "nothing was sent with this ID")],
+    },
+    MessageDoc {
         name: method::SCOPE_LIST,
         summary: "List the scope rules. They belong to the instance; intercept rules with \
                   `in_scope` use them.",
@@ -1002,6 +1385,15 @@ mod tests {
                 method::SCOPE_TEST => {
                     drop(serde_json::from_value::<ScopeTestParams>(params).unwrap());
                 }
+                method::REPEATER_NEW => {
+                    drop(serde_json::from_value::<RepeaterNewParams>(params).unwrap());
+                }
+                method::REPEATER_UPDATE => {
+                    drop(serde_json::from_value::<RepeaterUpdateParams>(params).unwrap());
+                }
+                method::REPEATER_HISTORY => {
+                    serde_json::from_value::<RepeaterHistoryParams>(params).unwrap();
+                }
                 _ => {}
             }
         }
@@ -1018,6 +1410,18 @@ mod tests {
             serde_json::from_value::<HistoryItem>(item).unwrap().summary,
             example_history()
         );
+        let tab = to_value(&example_tab(false));
+        assert_eq!(
+            serde_json::from_value::<RepeaterTab>(tab).unwrap(),
+            example_tab(false)
+        );
+        let options: RepeaterOptions = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(options, RepeaterOptions::default());
+        let send = to_value(&RepeaterSendSummary {
+            timings: RepeaterTimings::default(),
+            ..example_send()
+        });
+        assert!(serde_json::from_value::<RepeaterSendSummary>(send).is_ok());
         let start: ProxyStartParams = serde_json::from_value(json!({})).unwrap();
         assert_eq!(start, ProxyStartParams::default());
         assert!(serde_json::from_value::<ProxyStartParams>(json!({"lisen": []})).is_err());

@@ -448,6 +448,331 @@ Errors:
 - `-32001`: no project is open (start the instance with --project)
 - `-32602`: no recorded exchange has this ID
 
+### `repeater.list`
+
+List the repeater tabs of the project, without their requests.
+
+Parameters:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "tabs": [
+    {
+      "id": 3,
+      "name": "GET /api/items?page=2",
+      "options": {
+        "max_redirects": 10,
+        "redirects": "never",
+        "reuse_connection": false,
+        "update_content_length": false
+      },
+      "target": {
+        "host": "example.com",
+        "port": 443,
+        "tls": true
+      }
+    }
+  ]
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+
+### `repeater.new`
+
+Create a repeater tab, from a proxy history item (`from_history`) or from a target and a raw request. It is kept in the project.
+
+Parameters:
+
+```json
+{
+  "from_history": 42
+}
+```
+
+Result:
+
+```json
+{
+  "id": 3,
+  "name": "GET /api/items?page=2",
+  "options": {
+    "max_redirects": 10,
+    "redirects": "never",
+    "reuse_connection": false,
+    "update_content_length": false
+  },
+  "request": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+  "target": {
+    "host": "example.com",
+    "port": 443,
+    "tls": true
+  }
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no recorded exchange has this ID
+- `-32602`: `target` and `request` are needed without `from_history`
+- `-32602`: `request` is not valid base64
+
+### `repeater.show`
+
+Show a repeater tab, with its request.
+
+Parameters:
+
+```json
+{
+  "id": 3
+}
+```
+
+Result:
+
+```json
+{
+  "id": 3,
+  "name": "GET /api/items?page=2",
+  "options": {
+    "max_redirects": 10,
+    "redirects": "never",
+    "reuse_connection": false,
+    "update_content_length": false
+  },
+  "request": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+  "target": {
+    "host": "example.com",
+    "port": 443,
+    "tls": true
+  }
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no repeater tab has this ID
+
+### `repeater.update`
+
+Change a repeater tab's name, target, request or helpers. To go back to an earlier request, set `request` to one from `repeater.history_show`.
+
+Parameters:
+
+```json
+{
+  "id": 3,
+  "name": "items, page 2",
+  "options": {
+    "max_redirects": 10,
+    "redirects": "never",
+    "reuse_connection": false,
+    "update_content_length": true
+  }
+}
+```
+
+Result:
+
+```json
+{
+  "id": 3,
+  "name": "GET /api/items?page=2",
+  "options": {
+    "max_redirects": 10,
+    "redirects": "never",
+    "reuse_connection": false,
+    "update_content_length": false
+  },
+  "request": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+  "target": {
+    "host": "example.com",
+    "port": 443,
+    "tls": true
+  }
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no repeater tab has this ID
+- `-32602`: `request` is not valid base64
+
+### `repeater.close`
+
+Close a repeater tab, and forget what was sent from it.
+
+Parameters:
+
+```json
+{
+  "id": 3
+}
+```
+
+Result:
+
+```json
+{}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no repeater tab has this ID
+
+### `repeater.send`
+
+Send a tab's request to its target, with its helpers, and record it in the tab's history. Without helpers, the bytes sent are the request, exactly. A failed send is recorded too, with its `error`.
+
+Parameters:
+
+```json
+{
+  "id": 3
+}
+```
+
+Result:
+
+```json
+{
+  "sends": [
+    {
+      "id": 17,
+      "request": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+      "request_size": 412,
+      "response": "SFRUUC8xLjEgMjAwIE9LDQo…",
+      "response_size": 5321,
+      "started_ms": 1764000000000,
+      "status": 200,
+      "tab": 3,
+      "target": {
+        "host": "example.com",
+        "port": 443,
+        "tls": true
+      },
+      "timings": {
+        "connect_us": 18311,
+        "dns_us": 1204,
+        "tls_us": 36870,
+        "total_us": 109532,
+        "ttfb_us": 52007
+      }
+    }
+  ]
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no repeater tab has this ID
+
+### `repeater.history`
+
+List what was sent from a tab, newest first, one item per redirect hop.
+
+Parameters:
+
+```json
+{
+  "id": 3,
+  "limit": 50
+}
+```
+
+Result:
+
+```json
+{
+  "items": [
+    {
+      "id": 17,
+      "request_size": 412,
+      "response_size": 5321,
+      "started_ms": 1764000000000,
+      "status": 200,
+      "tab": 3,
+      "target": {
+        "host": "example.com",
+        "port": 443,
+        "tls": true
+      },
+      "timings": {
+        "connect_us": 18311,
+        "dns_us": 1204,
+        "tls_us": 36870,
+        "total_us": 109532,
+        "ttfb_us": 52007
+      }
+    }
+  ]
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: no repeater tab has this ID
+- `-32602`: `limit` is above 1000
+
+### `repeater.history_show`
+
+Show one request sent from a tab, with its response.
+
+Parameters:
+
+```json
+{
+  "id": 17
+}
+```
+
+Result:
+
+```json
+{
+  "id": 17,
+  "request": "R0VUIC9hcGkvaXRlbXM/cGFnZT0yIEhUVFAvMS4xDQo…",
+  "request_size": 412,
+  "response": "SFRUUC8xLjEgMjAwIE9LDQo…",
+  "response_size": 5321,
+  "started_ms": 1764000000000,
+  "status": 200,
+  "tab": 3,
+  "target": {
+    "host": "example.com",
+    "port": 443,
+    "tls": true
+  },
+  "timings": {
+    "connect_us": 18311,
+    "dns_us": 1204,
+    "tls_us": 36870,
+    "total_us": 109532,
+    "ttfb_us": 52007
+  }
+}
+```
+
+Errors:
+
+- `-32001`: no project is open (start the instance with --project)
+- `-32602`: nothing was sent with this ID
+
 ### `scope.list`
 
 List the scope rules. They belong to the instance; intercept rules with `in_scope` use them.
