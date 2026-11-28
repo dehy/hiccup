@@ -25,6 +25,7 @@ mod exchange;
 mod intercept;
 mod io;
 mod scope;
+mod sender;
 mod server;
 mod target;
 mod tls;
@@ -38,6 +39,7 @@ pub use intercept::{
     QueueEvent, QueueListener, TimeoutAction, Verdict,
 };
 pub use scope::{Scheme, Scope, ScopeRule, ScopeTarget};
+pub use sender::{SendTarget, Sender, Sent, Timings};
 pub use server::Proxy;
 pub use target::{AbsoluteTarget, Authority, HostPattern, TargetError};
 pub use upstream::{ClientCert, TlsVersion, UpstreamConfig};

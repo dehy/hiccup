@@ -29,10 +29,41 @@ pub(crate) struct Interceptor {
     leaf_key: KeyPair,
     provider: Arc<CryptoProvider>,
     cache: Mutex<Cache>,
-    /// Upstream configurations: one per client certificate rule, then the
-    /// default.
-    clients: Vec<(HostPattern, Arc<ClientConfig>)>,
-    default_client: Arc<ClientConfig>,
+    clients: Clients,
+}
+
+/// Upstream TLS configurations: one per client certificate rule, then the
+/// default.
+pub(crate) struct Clients {
+    rules: Vec<(HostPattern, Arc<ClientConfig>)>,
+    default: Arc<ClientConfig>,
+}
+
+impl Clients {
+    pub(crate) fn new(
+        provider: &Arc<CryptoProvider>,
+        upstream: &UpstreamConfig,
+    ) -> Result<Self, CaError> {
+        let rules = upstream
+            .client_certs
+            .iter()
+            .map(|(pattern, cert)| {
+                let config = client_config(provider, upstream, Some(cert))?;
+                Ok((pattern.clone(), config))
+            })
+            .collect::<Result<_, CaError>>()?;
+        Ok(Self {
+            rules,
+            default: client_config(provider, upstream, None)?,
+        })
+    }
+
+    /// The configuration for connections to the upstream `host`.
+    pub(crate) fn get(&self, host: &str) -> Arc<ClientConfig> {
+        first_match(&self.rules, host)
+            .unwrap_or(&self.default)
+            .clone()
+    }
 }
 
 impl Interceptor {
@@ -41,19 +72,10 @@ impl Interceptor {
         upstream: &UpstreamConfig,
     ) -> Result<Self, CaError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let clients = upstream
-            .client_certs
-            .iter()
-            .map(|(pattern, cert)| {
-                let config = client_config(&provider, upstream, Some(cert))?;
-                Ok((pattern.clone(), config))
-            })
-            .collect::<Result<_, CaError>>()?;
         Ok(Self {
             ca,
             leaf_key: KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?,
-            default_client: client_config(&provider, upstream, None)?,
-            clients,
+            clients: Clients::new(&provider, upstream)?,
             provider,
             cache: Mutex::new(Cache::default()),
         })
@@ -61,9 +83,7 @@ impl Interceptor {
 
     /// The configuration for connections to the upstream `host`.
     pub(crate) fn client_config(&self, host: &str) -> Arc<ClientConfig> {
-        first_match(&self.clients, host)
-            .unwrap_or(&self.default_client)
-            .clone()
+        self.clients.get(host)
     }
 
     /// A server configuration presenting a certificate for `host`, signed by
