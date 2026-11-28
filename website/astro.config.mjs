@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { execSync } from "node:child_process";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
-// The commit this build comes from, shown in the footers.
-const commit =
-  process.env.GITHUB_SHA ?? execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
+// The commit this build comes from, shown in the footers. GitHub Actions sets
+// it; a local build has none and says so.
+const commit = process.env.GITHUB_SHA ?? "";
 
 export default defineConfig({
   site: "https://dehy.github.io",

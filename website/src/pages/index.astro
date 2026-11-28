@@ -282,7 +282,7 @@ user=carol&amp;role=admin
   <div class="wrap">
     <p><a href="https://github.com/dehy/hiccup">Source</a> · <a href={docs("getting-started")}>Docs</a> · <a href={docs("contributing")}>Contributing</a> · <a href={docs("security")}>Security policy</a> · <a href="https://github.com/dehy/hiccup/blob/main/LICENSE">AGPL-3.0-or-later</a></p>
     <p>Hiccup is an independent project. It is not affiliated with or endorsed by PortSwigger Ltd, Checkmarx, Caido Labs or any other project named on this page. "Burp Suite" is a trademark of PortSwigger Ltd. Other names are trademarks of their respective owners. Set in IBM Plex, under the SIL Open Font License.</p>
-    <p>Built from <a href={commitUrl(BUILD)}><code>{BUILD.slice(0, 7)}</code></a>. Text and figures checked against <a href={commitUrl(CONTENT_BASE)}><code>{CONTENT_BASE.slice(0, 7)}</code></a>.</p>
+    <p>{BUILD ? <>Built from <a href={commitUrl(BUILD)}><code>{BUILD.slice(0, 7)}</code></a>.</> : "Local build."} Text and figures checked against <a href={commitUrl(CONTENT_BASE)}><code>{CONTENT_BASE.slice(0, 7)}</code></a>.</p>
   </div>
 </footer>
 </body>

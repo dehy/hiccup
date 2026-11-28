@@ -58,23 +58,32 @@ function rewriteTarget(target, from) {
 
 const ASIDES = { NOTE: "note", TIP: "tip", IMPORTANT: "note", WARNING: "caution", CAUTION: "danger" };
 
+// `> [!WARNING]` followed by quoted lines becomes `:::caution` … `:::`.
 function githubAlertsToAsides(text) {
-  return text.replace(
-    /^> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*\n((?:>.*(?:\n|$))*)/gm,
-    (_, kind, quoted) => {
-      const inner = quoted.replace(/^> ?/gm, "").replace(/\n+$/, "");
-      return `:::${ASIDES[kind]}\n${inner}\n:::\n`;
-    },
-  );
+  const lines = text.split("\n");
+  const result = [];
+  for (let i = 0; i < lines.length; i++) {
+    const kind = /^> \[!([A-Z]+)\]$/.exec(lines[i].trimEnd())?.[1];
+    if (!ASIDES[kind]) {
+      result.push(lines[i]);
+      continue;
+    }
+    const inner = [];
+    while (lines[i + 1]?.startsWith(">")) inner.push(lines[++i].replace(/^> ?/, ""));
+    while (inner.at(-1) === "") inner.pop();
+    result.push(`:::${ASIDES[kind]}`, ...inner, ":::");
+  }
+  return result.join("\n");
 }
 
 function convert(source, from) {
   const lines = source.split("\n");
   const h1 = lines.findIndex((line) => line.trim() !== "");
-  const match = /^#\s+(.+?)\s*$/.exec(lines[h1] ?? "");
-  if (!match) throw new Error(`${from}: the first line must be a # heading`);
-  const title = match[1].replace(/`/g, "");
-  let body = lines.slice(h1 + 1).join("\n").replace(/^\n+/, "");
+  if (!lines[h1]?.startsWith("# ")) throw new Error(`${from}: the first line must be a # heading`);
+  const title = lines[h1].slice(2).trim().replaceAll("`", "");
+  let start = h1 + 1;
+  while (lines[start] === "") start++;
+  let body = lines.slice(start).join("\n");
 
   // Outside fenced code blocks: rewrite links, and turn GitHub alerts
   // (`> [!WARNING]` blockquotes) into Starlight asides.
@@ -87,10 +96,11 @@ function convert(source, from) {
     )
     .join("");
 
+  const editUrl = `${REPO_URL}/edit/${BRANCH}/${from}`;
   const front = [
     "---",
     `title: ${JSON.stringify(title)}`,
-    `editUrl: ${JSON.stringify(`${REPO_URL}/edit/${BRANCH}/${from}`)}`,
+    `editUrl: ${JSON.stringify(editUrl)}`,
     ...(from.startsWith("docs/adr/")
       ? ["sidebar:", `  label: ${JSON.stringify(title.replace(/^ADR (\d+):\s*/, "$1 "))}`]
       : []),
@@ -111,10 +121,13 @@ for (const [from, slug] of pages) {
 const adrs = [...pages]
   .filter(([from]) => from.startsWith("docs/adr/"))
   .map(([from, slug]) => {
-    const head = readFileSync(join(root, from), "utf8").split("\n").find((l) => l.startsWith("# "));
-    const status = /\*\*Status:\*\*\s*([^\n]+)/.exec(readFileSync(join(root, from), "utf8"))?.[1] ?? "";
-    const title = head.slice(2).replace(/^ADR \d+:\s*/, "");
-    return `| [${from.match(/(\d{4})/)[1]}](${pageUrl(slug)}) | ${title} | ${status.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")} |`;
+    const lines = readFileSync(join(root, from), "utf8").split("\n");
+    const title = lines.find((l) => l.startsWith("# ")).slice(2).replace(/^ADR \d+: */, "");
+    const statusLine = lines.find((l) => l.includes("**Status:**")) ?? "";
+    const status = statusLine.slice(statusLine.indexOf("**Status:**") + "**Status:**".length).trim();
+    const number = slug.slice("adr/".length, "adr/".length + 4);
+    const plainStatus = status.replaceAll(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+    return `| [${number}](${pageUrl(slug)}) | ${title} | ${plainStatus} |`;
   });
 writeFileSync(
   join(out, "adr", "index.md"),

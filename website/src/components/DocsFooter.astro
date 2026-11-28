@@ -6,7 +6,7 @@ const commit = __BUILD_COMMIT__;
 ---
 <Default {...Astro.props}><slot /></Default>
 <p class="build">
-  Built from <a href={`https://github.com/dehy/hiccup/commit/${commit}`}><code>{commit.slice(0, 7)}</code></a>.
+  {commit ? <>Built from <a href={`https://github.com/dehy/hiccup/commit/${commit}`}><code>{commit.slice(0, 7)}</code></a>.</> : "Local build."}{" "}
   Website text written against <a href={`https://github.com/dehy/hiccup/commit/${CONTENT_BASE}`}><code>{CONTENT_BASE.slice(0, 7)}</code></a>.
 </p>
 <style>
