@@ -1,0 +1,51 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* Maps Starlight onto the Hiccup tokens (tokens.css): warm paper ramp, ember accent, IBM Plex. */
+:root {
+  --sl-font: var(--sans);
+  --sl-font-mono: var(--mono);
+  --sl-color-bg: var(--bg);
+  --sl-color-bg-nav: var(--bg);
+  --sl-color-bg-sidebar: var(--bg);
+  --sl-color-hairline: var(--line);
+  --sl-color-hairline-light: var(--line);
+  --sl-color-hairline-shade: var(--line);
+  --sl-color-white: var(--ink);
+  --sl-color-gray-1: var(--ink);
+  --sl-color-gray-2: var(--ink-2);
+  --sl-color-gray-3: var(--ink-3);
+  --sl-color-gray-5: var(--line);
+  --sl-color-gray-6: var(--raised);
+  --sl-color-text: var(--ink-2);
+  --sl-color-text-accent: var(--accent);
+  --sl-color-accent: var(--accent);
+  --sl-color-accent-high: var(--ink);
+  --sl-color-accent-low: var(--raised);
+}
+.sl-markdown-content h1, .sl-markdown-content h2, .sl-markdown-content h3, h1#_top { font-weight: 500; letter-spacing: -0.01em; }
+.sl-markdown-content :not(pre) > code { background: var(--raised); border-radius: 4px; padding: 0 4px; }
+.sl-markdown-content table { font-size: 14px; }
+.site-title img { height: 20px; width: auto; color: var(--ink); }
+
+/* Wordmark: the product name in Plex Mono with the ember cursor, as on the landing page. */
+.site-title { font-family: var(--mono); font-size: 18px; font-weight: 500; color: var(--ink); text-transform: lowercase; gap: 0; }
+.site-title::after { content: "_"; color: var(--accent); }
+
+/* Sidebar: quiet selection, a surface step instead of an accent block. */
+.sidebar-content .large { font-size: 15px; font-weight: 500; color: var(--ink); }
+.sidebar-content summary .group-label .large { font-size: 14px; }
+.sidebar-content a { font-size: 14px; border-radius: 8px; }
+.sidebar-content a[aria-current="page"],
+.sidebar-content a[aria-current="page"]:hover,
+.sidebar-content a[aria-current="page"]:focus {
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* Previous and next: plain links, not big cards. */
+.pagination-links a { box-shadow: none; border-radius: 12px; border-color: var(--line); }
+.pagination-links .link-title { font-size: 16px; line-height: 24px; color: var(--ink); }
+.pagination-links a:hover { border-color: var(--ink-3); }
+
+/* Search and theme controls sit on the card surface with a hairline. */
+site-search button[data-open-modal] { background: var(--card); border-color: var(--line); border-radius: 8px; }

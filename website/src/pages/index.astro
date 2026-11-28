@@ -1,0 +1,289 @@
+---
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import "../styles/fonts.css";
+import "../styles/tokens.css";
+import "../styles/landing.css";
+import { CONTENT_BASE } from "../site";
+
+const base = import.meta.env.BASE_URL.replace(/\/?$/, "/");
+const home = base;
+const docs = (slug: string) => `${base}docs/${slug}/`;
+const commitUrl = (sha: string) => `https://github.com/dehy/hiccup/commit/${sha}`;
+const BUILD = __BUILD_COMMIT__;
+---
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hiccup</title>
+<meta name="description" content="A lean, open source intercepting proxy and Repeater for web security testing, written in Rust. Pre-alpha.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml">
+<script is:inline>
+  // Follow the theme chosen in the docs (Starlight stores it), else the system.
+  try {
+    const t = localStorage.getItem("starlight-theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch {}
+</script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href={home} aria-label="Hiccup">hiccup<span>_</span></a>
+    <nav>
+      <a href="#today">Status</a>
+      <a class="opt" href="#principles">Principles</a>
+      <a href="#compare">Compare</a>
+      <a href={docs("getting-started")}>Docs</a>
+      <a class="nav-btn" href="https://github.com/dehy/hiccup">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+  <div class="hero">
+    <h1>A lean, open source intercepting proxy, written in Rust</h1>
+    <p class="lede">Hiccup is an intercepting proxy and Repeater for web security testing. It ships as one native binary, with no JVM, Electron or Python runtime, and all of it is open source under the AGPL: no paid edition, no account, no telemetry. It is pre-alpha: the headless proxy and its history work today, and the Repeater and the desktop apps come next.</p>
+    <div class="actions">
+      <a class="btn primary" href={docs("getting-started")}>Get started</a>
+      <a class="btn secondary" href={docs("roadmap")}>Read the roadmap</a>
+    </div>
+
+    <div class="window" role="img" aria-label="A terminal session: Hiccup holds a POST request, shows its raw bytes with a lowercase host header, both Content-Length and Transfer-Encoding, and a duplicate X-Forwarded-For header, then forwards it unchanged">
+      <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/engagements/acme</span></div>
+<pre aria-hidden="true"><span class="p">$ </span>hiccup scope add --protocol https --host '*.example.com'
+<span class="p">$ </span>hiccup intercept on --in-scope --method POST
+<span class="p">$ </span>hiccup intercept list
+<span class="o">    ID  DIR       METHOD   STATUS      AGE  TARGET
+     1  request   POST          -     2.4s  https://app.example.com/api/login</span>
+<span class="p">$ </span>hiccup intercept show 1 --raw
+<span class="o">POST /api/login HTTP/1.1
+<span class="q">host</span>: app.example.com                 <span class="n">lowercase name, kept</span>
+<span class="q">Content-Length: 32</span>
+<span class="q">Transfer-Encoding: chunked</span>            <span class="n">both framing headers, kept</span>
+X-Forwarded-For: 127.0.0.1
+<span class="q">x-forwarded-for</span>: 10.0.0.1             <span class="n">duplicate, kept in order</span>
+
+15
+user=carol&amp;role=admin
+0
+</span>
+<span class="p">$ </span>hiccup intercept forward 1
+<span class="o">Forwarded.</span></pre>
+    </div>
+
+    <dl class="figures">
+      <div><dt>Binary, stripped</dt><dd>8.0 MB</dd></div>
+      <div><dt>From launch to listening</dt><dd>9 ms</dd></div>
+      <div><dt>Memory at idle</dt><dd>15.5 MB</dd></div>
+      <div><dt>After 2,000 recorded requests</dt><dd>17.3 MB</dd></div>
+    </dl>
+    <p class="figures-note">Release build of commit <a href={commitUrl(CONTENT_BASE)}><code>{CONTENT_BASE.slice(0, 7)}</code></a> on an Apple M1 Pro running macOS: resident memory of <code>hiccup proxy start --foreground</code> recording history to a project file, and the median of five starts until the port accepts connections. Build it yourself and check.</p>
+  </div>
+</div>
+
+<section id="today">
+  <div class="wrap">
+    <h2>What works today, and what doesn't yet</h2>
+    <p class="sub">The headless proxy and its history are usable from the command line on macOS, Windows and Linux. The Repeater and the desktop apps are still to come.</p>
+    <div class="split">
+      <div>
+        <h3>Working now</h3>
+        <ul class="list">
+          <li><span class="mark">✓</span><span>HTTP/1.1 proxy, absolute-form and <code>CONNECT</code></span><span></span></li>
+          <li><span class="mark">✓</span><span>HTTPS interception with a CA generated per installation</span><span></span></li>
+          <li><span class="mark">✓</span><span>TLS passthrough for chosen hosts</span><span></span></li>
+          <li><span class="mark">✓</span><span>Intercept queue: hold, edit, forward or drop</span><span></span></li>
+          <li><span class="mark">✓</span><span>Scope rules on protocol, host, port and path</span><span></span></li>
+          <li><span class="mark">✓</span><span>History in a SQLite project file, searchable and exportable</span><span></span></li>
+          <li><span class="mark">✓</span><span>Live event stream, as text or JSON lines</span><span></span></li>
+          <li><span class="mark">✓</span><span>Local control API, JSON-RPC over a socket or pipe</span><span></span></li>
+          <li><span class="mark">✓</span><span>Saved defaults, shell completions and man pages</span><span></span></li>
+        </ul>
+      </div>
+      <div>
+        <h3>Not yet</h3>
+        <ul class="list next">
+          <li><span class="mark">–</span><span>Repeater with persisted tabs</span><span class="meta">M2</span></li>
+          <li><span class="mark">–</span><span>Swift and C# bindings</span><span class="meta">M3</span></li>
+          <li><span class="mark">–</span><span>SwiftUI app on macOS</span><span class="meta">M4, v0.1.0</span></li>
+          <li><span class="mark">–</span><span>WinUI 3 app on Windows</span><span class="meta">M5</span></li>
+          <li><span class="mark">–</span><span>GTK4 app on Linux</span><span class="meta">M6</span></li>
+          <li><span class="mark">–</span><span>HTTP/2, WebSockets, scanner, fuzzer</span><span class="meta">backlog</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="principles">
+  <div class="wrap">
+    <h2>Principles</h2>
+    <p class="sub">Each one is backed by an architecture decision record in the repository.</p>
+    <ol class="principles">
+      <li><span class="num">01</span><div>
+        <h3>Open source, all of it</h3>
+        <p>AGPL-3.0-or-later, so forks and hosted versions stay open. Contributions are signed off under the DCO, with no CLA, so Hiccup can't be relicensed without every contributor's agreement. <a href={docs("adr/0002-license-agpl")}>ADR 0002</a></p>
+      </div></li>
+      <li><span class="num">02</span><div>
+        <h3>Lean and native</h3>
+        <p>One Rust binary with no runtime to install, light enough to leave running in a terminal or a CI job. Unsafe code is denied across the workspace.</p>
+      </div></li>
+      <li><span class="num">03</span><div>
+        <h3>Wire fidelity</h3>
+        <p>Every message is stored as its raw bytes. Parsed fields are a read-only view next to them. <a href={docs("adr/0003-raw-http-fidelity")}>ADR 0003</a></p>
+      </div></li>
+      <li><span class="num">04</span><div>
+        <h3>Entirely controllable from the CLI</h3>
+        <p>A feature isn't done until it works from <code>hiccup</code>, against a headless daemon or, later, the desktop app. <a href={docs("adr/0004-cli-control-plane")}>ADR 0004</a></p>
+      </div></li>
+      <li><span class="num">05</span><div>
+        <h3>Thin native frontends, fat core</h3>
+        <p>All the logic is in Rust. SwiftUI, WinUI 3 and GTK4 apps only render view-models, and every change is tested on macOS, Windows and Linux. <a href={docs("adr/0001-architecture-native-frontends")}>ADR 0001</a></p>
+      </div></li>
+      <li><span class="num">06</span><div>
+        <h3>Local and private</h3>
+        <p>No telemetry, no account, no cloud dependency. This website loads nothing from third parties either, fonts included.</p>
+      </div></li>
+    </ol>
+  </div>
+</section>
+
+<section id="fidelity">
+  <div class="wrap fidelity">
+    <div>
+      <h2>Exact bytes by default</h2>
+      <p class="sub">Testing request smuggling or a parser bug needs the exact bytes on the wire. Some tools send them once you turn off their helpers, like Content-Length updates or line ending normalization. In Hiccup it is the default, in the intercept queue too, and every edit is recorded.</p>
+      <ul class="kept">
+        <li>Header order and header case</li>
+        <li>Duplicate headers</li>
+        <li>Both <code>Content-Length</code> and <code>Transfer-Encoding</code></li>
+        <li>Bare <code>\n</code> line endings and malformed lines</li>
+      </ul>
+    </div>
+    <div class="wire" role="img" aria-label="The 186 bytes of the edited request as they are sent upstream, with every line ending and byte offset shown">
+      <div class="window-bar" aria-hidden="true"><span>upstream app.example.com:443</span><span>186 bytes</span></div>
+<pre aria-hidden="true"><span class="off">0000</span>POST /api/login HTTP/1.1<span class="eol">␍␊</span>
+<span class="off">001a</span><span class="q">host</span>: app.example.com<span class="eol">␍␊</span>
+<span class="off">0031</span><span class="q">Content-Length: 32</span><span class="eol">␍␊</span>
+<span class="off">0045</span><span class="q">Transfer-Encoding: chunked</span><span class="eol">␍␊</span>
+<span class="off">0061</span>X-Forwarded-For: 127.0.0.1<span class="eol">␍␊</span>
+<span class="off">007d</span><span class="q">x-forwarded-for</span>: 10.0.0.1<span class="eol">␍␊</span>
+<span class="off">0098</span><span class="eol">␍␊</span>
+<span class="off">009a</span>15<span class="eol">␍␊</span>
+<span class="off">009e</span>user=carol&amp;role=admin<span class="eol">␍␊</span>
+<span class="off">00b5</span>0<span class="eol">␍␊</span>
+<span class="off">00b8</span><span class="eol">␍␊</span></pre>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <h2>How Hiccup compares</h2>
+    <p class="sub">There are mature tools in this space, and most of them do more than Hiccup does today. Caido is the other one built on Rust, and it is closed source. This is where Hiccup stands, and where it is headed.</p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Project</th>
+            <th scope="col">Open source</th>
+            <th scope="col">Built on</th>
+            <th scope="col">Interface</th>
+            <th scope="col">Edit and resend</th>
+            <th scope="col">Automation</th>
+            <th scope="col">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="self">
+            <th scope="row">Hiccup</th>
+            <td>Yes, AGPL-3.0</td>
+            <td>Rust, one native binary</td>
+            <td>CLI today; SwiftUI, WinUI 3 and GTK4 apps <span class="planned">planned</span></td>
+            <td>Intercept, edit and history today; Repeater <span class="planned">M2</span></td>
+            <td>CLI and JSON-RPC for every feature, on any running instance</td>
+            <td>Free</td>
+          </tr>
+          <tr>
+            <th scope="row">Burp Suite Community</th>
+            <td>No</td>
+            <td>Java, on the JVM</td>
+            <td>Desktop app (Swing)</td>
+            <td>Repeater</td>
+            <td>Java extensions, BApp Store</td>
+            <td>Free; Professional is paid</td>
+          </tr>
+          <tr>
+            <th scope="row">ZAP</th>
+            <td>Yes, Apache-2.0</td>
+            <td>Java, on the JVM</td>
+            <td>Desktop app (Swing), daemon mode</td>
+            <td>Request editor</td>
+            <td>REST API, scripts, add-ons</td>
+            <td>Free</td>
+          </tr>
+          <tr>
+            <th scope="row">mitmproxy</th>
+            <td>Yes, MIT</td>
+            <td>Python</td>
+            <td>Terminal UI, web UI, <code>mitmdump</code></td>
+            <td>Edit and replay flows</td>
+            <td>Python addons</td>
+            <td>Free</td>
+          </tr>
+          <tr>
+            <th scope="row">Caido</th>
+            <td>No</td>
+            <td>Rust core, Vue UI</td>
+            <td>Browser UI, desktop app (Electron)</td>
+            <td>Replay</td>
+            <td>GraphQL API, plugins</td>
+            <td>Free tier; paid plans</td>
+          </tr>
+          <tr>
+            <th scope="row">HTTP Toolkit</th>
+            <td>Yes, AGPL-3.0</td>
+            <td>TypeScript, Node and Electron</td>
+            <td>Desktop app (Electron)</td>
+            <td>Breakpoints, send requests</td>
+            <td>Rewrite rules and mocks (Pro)</td>
+            <td>Free; Pro is paid</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Based on each project's public documentation as of November 2026. These tools change quickly, so check their sites before you decide. Something wrong? <a href="https://github.com/dehy/hiccup/issues">Open an issue</a>.</p>
+
+    <div class="pick">
+      <div>
+        <h3>Choose Hiccup if</h3>
+        <p class="lead">you want a lean, native proxy that is open source all the way down, you work from a shell, and you're happy to follow a pre-alpha project.</p>
+      </div>
+      <div class="rest">
+        <div>
+          <h3>Choose something else if</h3>
+          <p>you need a GUI, a Repeater, HTTP/2 or WebSockets today: the tools above already have them. For a free scanner, ZAP includes one; Burp Suite's is in the paid edition.</p>
+        </div>
+        <div>
+          <h3>Use both if</h3>
+          <p>you keep a favourite GUI tool and also want a proxy for scripts and CI jobs, where JSON output and a control API matter more than windows.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><a href="https://github.com/dehy/hiccup">Source</a> · <a href={docs("getting-started")}>Docs</a> · <a href={docs("contributing")}>Contributing</a> · <a href={docs("security")}>Security policy</a> · <a href="https://github.com/dehy/hiccup/blob/main/LICENSE">AGPL-3.0-or-later</a></p>
+    <p>Hiccup is an independent project. It is not affiliated with or endorsed by PortSwigger Ltd, Checkmarx, Caido Labs or any other project named on this page. "Burp Suite" is a trademark of PortSwigger Ltd. Other names are trademarks of their respective owners. Set in IBM Plex, under the SIL Open Font License.</p>
+    <p>Built from <a href={commitUrl(BUILD)}><code>{BUILD.slice(0, 7)}</code></a>. Text and figures checked against <a href={commitUrl(CONTENT_BASE)}><code>{CONTENT_BASE.slice(0, 7)}</code></a>.</p>
+  </div>
+</footer>
+</body>
+</html>

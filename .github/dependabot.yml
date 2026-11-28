@@ -19,3 +19,13 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci(deps)"
+
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+    groups:
+      website:
+        patterns: ["*"]
+    commit-message:
+      prefix: "build(deps)"
