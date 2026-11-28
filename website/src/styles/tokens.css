@@ -1,0 +1,52 @@
+/* Warm ramp: paper page, ink terminal. One accent, ember. */
+:root {
+  --bg: #f7f4ee;
+  --card: #fdfbf7;
+  --raised: #efe9df;
+  --ink: #1f1b16;
+  --ink-2: #5e554a;
+  --ink-3: #736a5e;
+  --line: rgba(31, 27, 22, 0.1);
+  --accent: #b23c0b;
+  --ok: #2f7a3e;
+
+  --term: #161513;
+  --term-bar: #1c1a18;
+  --term-line: rgba(239, 233, 222, 0.08);
+  --term-ink: #efe9de;
+  --term-ink-2: #aaa398;
+  --term-ink-3: #8a847a;
+  --term-accent: #f08a4b;
+
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161513;
+    --card: #1c1a18;
+    --raised: #262421;
+    --ink: #efe9de;
+    --ink-2: #aaa398;
+    --ink-3: #8a847a;
+    --line: rgba(239, 233, 222, 0.08);
+    --accent: #f08a4b;
+    --ok: #4cc38a;
+    --term: #0f0e0c;
+    --term-bar: #12110f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161513;
+  --card: #1c1a18;
+  --raised: #262421;
+  --ink: #efe9de;
+  --ink-2: #aaa398;
+  --ink-3: #8a847a;
+  --line: rgba(239, 233, 222, 0.08);
+  --accent: #f08a4b;
+  --ok: #4cc38a;
+  --term: #0f0e0c;
+  --term-bar: #12110f;
+}
