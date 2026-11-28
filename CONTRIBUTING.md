@@ -93,7 +93,7 @@ Sign off by committing with `-s`:
 git commit -s -m "fix(http): handle empty chunk extensions"
 ```
 
-A CI check rejects pull requests that contain commits without a sign-off. To fix older commits, run `git rebase --signoff main`.
+A CI check rejects pull requests that contain commits without a sign-off. To fix older commits, run `git rebase --signoff main`. Dependabot cannot sign off, so its own commits in the pull requests it opens are exempt.
 
 ## Pull request workflow
 
