@@ -22,6 +22,7 @@ pub mod ca;
 mod config;
 mod connection;
 mod exchange;
+mod helpers;
 mod intercept;
 mod io;
 mod scope;
@@ -39,7 +40,7 @@ pub use intercept::{
     QueueEvent, QueueListener, TimeoutAction, Verdict,
 };
 pub use scope::{Scheme, Scope, ScopeRule, ScopeTarget};
-pub use sender::{SendTarget, Sender, Sent, Timings};
+pub use sender::{Applied, Helpers, Redirects, SendTarget, Sender, Sent, Timings};
 pub use server::Proxy;
 pub use target::{AbsoluteTarget, Authority, HostPattern, TargetError};
 pub use upstream::{ClientCert, TlsVersion, UpstreamConfig};

@@ -834,7 +834,7 @@ fn rewrite_target(head: &RequestHead, target: &AbsoluteTarget) -> (Vec<u8>, Modi
 
 /// Whether the sender of `head`, which has this HTTP `version`, expects the
 /// connection to stay open (RFC 9112 §9.3).
-fn keep_alive(head: &Head, version: &[u8]) -> bool {
+pub(crate) fn keep_alive(head: &Head, version: &[u8]) -> bool {
     let has = |token: &str| {
         head.get_all("connection").any(|h| {
             h.value()
@@ -861,7 +861,7 @@ fn is_closed_connection(e: &io::Error) -> bool {
 }
 
 /// RFC 9110 §9.2.2.
-fn is_idempotent(method: &[u8]) -> bool {
+pub(crate) fn is_idempotent(method: &[u8]) -> bool {
     matches!(
         method,
         b"GET" | b"HEAD" | b"OPTIONS" | b"TRACE" | b"PUT" | b"DELETE"
