@@ -102,8 +102,7 @@ fn foreground_proxy_forwards_a_request() {
         .unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
+    stop(&data, child);
 
     assert!(
         response.ends_with(b"\r\n\r\nhi"),
@@ -132,12 +131,19 @@ fn listening_beyond_loopback_warns() {
                 break;
             }
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        stop(&data, child);
         warned
     };
     assert!(warned("0.0.0.0:0"));
     assert!(!warned("127.0.0.1:0"));
+}
+
+/// Stops a foreground proxy the way a user would, so that it exits normally
+/// (a killed process writes no coverage data).
+fn stop(data: &tempfile::TempDir, mut child: std::process::Child) {
+    let stopped = hiccup(data).args(["instance", "stop"]).output().unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert!(child.wait().unwrap().success());
 }
 
 /// The start lines of a foreground proxy, then stops it.
@@ -153,8 +159,7 @@ fn start_lines(data: &tempfile::TempDir, args: &[&str]) -> String {
     while !lines.contains("Press Ctrl+C") {
         assert!(stderr.read_line(&mut lines).unwrap() > 0, "{lines}");
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    stop(data, child);
     lines
 }
 
@@ -185,11 +190,43 @@ fn saved_defaults_apply_and_flags_win() {
         "{lines}"
     );
 
-    let out = hiccup(&data)
-        .args(["config", "set", "colour", "red"])
+    // Reading the settings, as text and as JSON.
+    let get = |args: &[&str]| hiccup(&data).arg("config").args(args).output().unwrap();
+    let all = String::from_utf8(get(&["get"]).stdout).unwrap();
+    assert!(all.contains("proxy.listen = 127.0.0.1:0"), "{all}");
+    assert!(all.contains("proxy.verify-upstream = (not set)"), "{all}");
+    let one = get(&["get", "proxy.listen"]);
+    assert_eq!(String::from_utf8(one.stdout).unwrap(), "127.0.0.1:0\n");
+    let json = hiccup(&data)
+        .args(["--json", "config", "get"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2), "a usage error");
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(json["proxy.listen"], serde_json::json!(["127.0.0.1:0"]));
+    let unset = hiccup(&data)
+        .args(["--json", "config", "get", "project"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(unset.stdout).unwrap().trim(), "null");
+
+    // Usage errors (2), and a damaged file (1).
+    for args in [
+        &["set", "colour", "red"][..],
+        &["get", "colour"],
+        &["unset", "colour"],
+    ] {
+        assert_eq!(get(args).status.code(), Some(2), "{args:?}");
+    }
+    assert_eq!(
+        get(&["set", "proxy.verify-upstream", "maybe"])
+            .status
+            .code(),
+        Some(2)
+    );
+    std::fs::write(data.path().join("config.json"), b"not json").unwrap();
+    let damaged = get(&["get"]);
+    assert_eq!(damaged.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("is not valid"));
 }
 
 #[test]
