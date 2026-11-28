@@ -27,6 +27,7 @@ const pages = new Map([
   ["docs/ca.md", "ca"],
   ["docs/cli.md", "cli"],
   ["docs/control-api.md", "control-api"],
+  ["docs/ai-agents.md", "ai-agents"],
   ["docs/architecture.md", "architecture"],
   ["ROADMAP.md", "roadmap"],
   ["CHANGELOG.md", "changelog"],
