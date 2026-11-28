@@ -65,6 +65,7 @@ Each item becomes its own milestone when it is scheduled.
 - Sequencer (token randomness analysis)
 - Passive scanner
 - Extension API (WASM plugins)
+- MCP server (`hiccup mcp`), a thin adapter over the control API for agents that only call tools; the CLI and the agent skill cover agents with a shell today
 - Project import/export (HAR, raw)
 
 ## Changing the roadmap

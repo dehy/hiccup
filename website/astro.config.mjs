@@ -50,6 +50,7 @@ export default defineConfig({
             { label: "Getting started", slug: "docs/getting-started" },
             { label: "Building from source", slug: "docs/building" },
             { label: "Installing the CA", slug: "docs/ca" },
+            { label: "Using with AI agents", slug: "docs/ai-agents" },
           ],
         },
         {

@@ -89,6 +89,8 @@ hiccup --json events --filter exchange | jq .
 
 To use a browser, [install the Hiccup CA](docs/ca.md) and set `127.0.0.1:8080` as its HTTP and HTTPS proxy. Use `--tls-passthrough` for hosts that should not be decrypted. The proxy forwards, intercepts and records traffic; the Repeater is next on the [roadmap](ROADMAP.md).
 
+Hiccup is agent ready: coding agents such as Claude Code or Codex can drive it through the CLI, with the [agent skill](skills/hiccup/SKILL.md) in this repository. See [docs/ai-agents.md](docs/ai-agents.md).
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS and Windows.
 
 ## Documentation
@@ -96,6 +98,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup on Linux, macOS
 - [Roadmap & milestones](ROADMAP.md)
 - [Installing the Hiccup CA](docs/ca.md)
 - [Control API reference](docs/control-api.md)
+- [Using Hiccup with AI agents](docs/ai-agents.md)
 - [Architecture overview](docs/architecture.md)
 - [Architecture decision records](docs/adr/)
 - [Releasing](docs/releasing.md)
